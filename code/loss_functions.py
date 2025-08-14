@@ -369,7 +369,7 @@ class CombinedLoss(nn.Module):
         super().__init__()
         self.outliers_loss = OutliersLoss(conf)
         self.weighted_ESFM_loss = ESFMLoss_weighted(conf)
-        pairwise_loss = self.pairwise_loss(pred_cam, data, epoch)
+        self.pairwise_loss = PairwiseConsistencyLoss(conf)
         self.alpha = conf.get_float('loss.reproj_loss_weight')
         self.beta = conf.get_float('loss.classification_loss_weight')
         self.pairwise_weight = conf.get_float("loss.pairwise_weight", default=1.0)
@@ -454,4 +454,3 @@ class GTLoss(nn.Module):
             print("loss = {}, orient err = {}, trans err = {}".format(loss, orient_loss, tran_loss))
 
         return loss
-

@@ -1,7 +1,7 @@
 import random
 
 from datasets import SceneData
-import dataset_utils
+import utils.dataset_utils as dataset_utils
 import numpy as np
 
 
