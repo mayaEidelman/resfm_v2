@@ -163,6 +163,7 @@ def train(conf, train_data, model, phase, validation_data=None, test_data=None, 
         loss_name = conf.get_string('loss.func')
     # Get loss function from the loss_functions module
     loss_func = getattr(loss_functions, loss_name)(conf)
+    print(f'Training with loss function  of type {type(loss_func)}')
 
 
     # === Optimizer & Scheduler ===

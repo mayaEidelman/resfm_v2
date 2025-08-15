@@ -386,6 +386,7 @@ class CombinedLoss(nn.Module):
         
         # If no pairwise data is available, set pairwise weight to 0
         effective_pairwise_weight = self.pairwise_weight if has_pairwise_data else 0.0
+        print(effective_pairwise_weight, "!!!!!!!!!!!!!!!!!!")
         # Reprojection loss (geometric loss)
         if self.alpha:
             ESFMLoss = self.weighted_ESFM_loss(pred_cam, pred_outliers, data)
@@ -397,6 +398,7 @@ class CombinedLoss(nn.Module):
         # Pairwise loss
         if effective_pairwise_weight:
             pairwiseLoss = self.pairwise_loss(pred_cam, data, epoch)
+            print("Pairwise Loss:", pairwiseLoss)
 
 
         loss = self.alpha * ESFMLoss + self.beta * classificationLoss + effective_pairwise_weight * pairwiseLoss
