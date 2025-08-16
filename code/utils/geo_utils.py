@@ -500,3 +500,197 @@ def remove_empty_tracks_cams(M, Ps=None, Ns=None, outliers=None, Xs=None, data=N
 	pts3DValidIndices = cam_per_pts >= cam_per_pts_thresh
 	return M, Ps, Ns, outliers, Xs, camValidIndices, pts3DValidIndices
 
+
+##################################################################################################
+
+def compute_relative_pose_from_matches(pts1, pts2, K1=None, K2=None, method='8pt'):
+    """
+    Compute relative pose between two cameras from point matches.
+    
+    Args:
+        pts1: [2, N] or [3, N] points in first image
+        pts2: [2, N] or [3, N] points in second image  
+        K1: Intrinsic matrix for first camera (optional)
+        K2: Intrinsic matrix for second camera (optional)
+        method: '8pt' for 8-point algorithm, '5pt' for 5-point algorithm
+        
+    Returns:
+        R: Relative rotation matrix [3, 3]
+        t: Relative translation vector [3, 1]
+        inliers: Boolean mask of inlier matches
+    """
+    if isinstance(pts1, torch.Tensor):
+        pts1 = pts1.cpu().numpy()
+    if isinstance(pts2, torch.Tensor):
+        pts2 = pts2.cpu().numpy()
+    
+    # Ensure points are in correct format
+    if pts1.shape[0] == 3:
+        pts1 = pts1[:2] / pts1[2]
+    if pts2.shape[0] == 3:
+        pts2 = pts2[:2] / pts2[2]
+    
+    pts1 = pts1.T  # [N, 2]
+    pts2 = pts2.T  # [N, 2]
+    
+    if method == '8pt':
+        # 8-point algorithm
+        if K1 is not None and K2 is not None:
+            # Calibrated case - compute essential matrix
+            E, inliers = cv2.findEssentialMat(pts1, pts2, K1, method=cv2.RANSAC, 
+                                            prob=0.999, threshold=1.0)
+        else:
+            # Uncalibrated case - compute fundamental matrix
+            F, inliers = cv2.findFundamentalMat(pts1, pts2, cv2.RANSAC, 1.0, 0.999)
+            if K1 is not None and K2 is not None:
+                E = K2.T @ F @ K1
+            else:
+                # For uncalibrated case, we can't get unique relative pose
+                return None, None, inliers
+    elif method == '5pt':
+        # 5-point algorithm (calibrated case only)
+        if K1 is None or K2 is None:
+            raise ValueError("5-point algorithm requires calibrated cameras")
+        E, inliers = cv2.findEssentialMat(pts1, pts2, K1, method=cv2.RANSAC, 
+                                        prob=0.999, threshold=1.0)
+    else:
+        raise ValueError(f"Unknown method: {method}")
+    
+    if E is None or inliers is None:
+        return None, None, None
+    
+    # Decompose essential matrix to get relative pose
+    _, R, t, _ = cv2.recoverPose(E, pts1, pts2, K1, mask=inliers)
+    
+    return R, t, inliers
+
+
+def batch_compute_relative_poses(matches_dict, Ks=None):
+    """
+    Compute relative poses for all camera pairs in a batch.
+    
+    Args:
+        matches_dict: Dictionary with keys (i, j) containing match data
+        Ks: List of intrinsic matrices [m, 3, 3] or None for uncalibrated case
+        
+    Returns:
+        relative_poses: Dictionary with keys (i, j) containing relative poses
+    """
+    relative_poses = {}
+    
+    for (i, j), matches in matches_dict.items():
+        pts1 = matches['pts1']
+        pts2 = matches['pts2']
+        
+        K1 = Ks[i] if Ks is not None else None
+        K2 = Ks[j] if Ks is not None else None
+        
+        R, t, inliers = compute_relative_pose_from_matches(pts1, pts2, K1, K2)
+        
+        if R is not None and t is not None:
+            relative_poses[(i, j)] = {
+                'R': torch.from_numpy(R).float(),
+                't': torch.from_numpy(t).float(),
+                'inliers': torch.from_numpy(inliers).bool() if inliers is not None else None
+            }
+    
+    return relative_poses
+
+
+def compute_epipolar_constraint_error(F, pts1, pts2):
+    """
+    Compute epipolar constraint error using fundamental matrix.
+    
+    Args:
+        F: Fundamental matrix [3, 3]
+        pts1: Points in first image [2, N] or [3, N]
+        pts2: Points in second image [2, N] or [3, N]
+        
+    Returns:
+        error: Mean epipolar error
+    """
+    if isinstance(F, torch.Tensor):
+        F = F.cpu().numpy()
+    if isinstance(pts1, torch.Tensor):
+        pts1 = pts1.cpu().numpy()
+    if isinstance(pts2, torch.Tensor):
+        pts2 = pts2.cpu().numpy()
+    
+    # Ensure points are in homogeneous coordinates
+    if pts1.shape[0] == 2:
+        pts1 = np.vstack([pts1, np.ones((1, pts1.shape[1]))])
+    if pts2.shape[0] == 2:
+        pts2 = np.vstack([pts2, np.ones((1, pts2.shape[1]))])
+    
+    # Compute epipolar lines
+    lines1 = F @ pts2  # F * x2
+    lines2 = F.T @ pts1  # F^T * x1
+    
+    # Compute distances
+    dist1 = np.abs(np.sum(pts1 * lines1, axis=0)) / np.linalg.norm(lines1[:2, :], axis=0)
+    dist2 = np.abs(np.sum(pts2 * lines2, axis=0)) / np.linalg.norm(lines2[:2, :], axis=0)
+    
+    # Symmetric epipolar distance
+    return np.mean(dist1 + dist2)
+
+
+def validate_relative_pose(R, t, pts1, pts2, K1=None, K2=None, threshold=4.0):
+    """
+    Validate relative pose by checking if points triangulate in front of both cameras.
+    
+    Args:
+        R: Relative rotation [3, 3]
+        t: Relative translation [3, 1]
+        pts1: Points in first image [2, N]
+        pts2: Points in second image [2, N]
+        K1: Intrinsic matrix for first camera
+        K2: Intrinsic matrix for second camera
+        threshold: Reprojection error threshold
+        
+    Returns:
+        valid: Boolean indicating if pose is valid
+        error: Mean reprojection error
+    """
+    if isinstance(R, torch.Tensor):
+        R = R.cpu().numpy()
+    if isinstance(t, torch.Tensor):
+        t = t.cpu().numpy()
+    if isinstance(pts1, torch.Tensor):
+        pts1 = pts1.cpu().numpy()
+    if isinstance(pts2, torch.Tensor):
+        pts2 = pts2.cpu().numpy()
+    
+    # Create camera matrices
+    P1 = np.eye(3, 4)  # First camera at origin
+    P2 = np.hstack([R, t])  # Second camera with relative pose
+    
+    if K1 is not None and K2 is not None:
+        P1 = K1 @ P1
+        P2 = K2 @ P2
+    
+    # Triangulate points
+    points_3d = cv2.triangulatePoints(P1, P2, pts1, pts2)
+    points_3d = points_3d / points_3d[3]  # Normalize homogeneous coordinates
+    
+    # Project back to images
+    proj1 = P1 @ points_3d
+    proj2 = P2 @ points_3d
+    
+    # Check if points are in front of cameras
+    in_front1 = proj1[2] > 0
+    in_front2 = proj2[2] > 0
+    in_front = in_front1 & in_front2
+    
+    if not np.any(in_front):
+        return False, float('inf')
+    
+    # Compute reprojection error
+    proj1 = proj1[:2] / proj1[2]
+    proj2 = proj2[:2] / proj2[2]
+    
+    error1 = np.linalg.norm(pts1 - proj1, axis=0)
+    error2 = np.linalg.norm(pts2 - proj2, axis=0)
+    
+    mean_error = np.mean(error1 + error2)
+    
+    return mean_error < threshold, mean_error

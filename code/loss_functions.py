@@ -2,7 +2,7 @@ import torch
 from utils import geo_utils
 from torch import nn
 from torch.nn import functional as F
-
+import cv2
 
 class ESFMLoss(nn.Module):
     def __init__(self, conf):
@@ -147,6 +147,7 @@ class PairwiseConsistencyLoss(nn.Module):
         
         # Check if we have matches available
         has_matches = hasattr(data, 'matches') and len(data.matches) > 0
+        print("has_matches?", has_matches, len(data.matches))
         
         # If no pairwise data is available, return zero loss
         if not has_matches:
@@ -159,22 +160,28 @@ class PairwiseConsistencyLoss(nn.Module):
             for j in range(i + 1, n_cameras):
                 if (i, j) in data.matches:
                     matches_ij = data.matches[(i, j)]
+                    print("len(matches_ij['pts1']) > 8", len(matches_ij['pts1']) )
                     if len(matches_ij['pts1']) > 8:  # Need at least 8 points for fundamental matrix
                         pts1 = matches_ij['pts1']
                         pts2 = matches_ij['pts2']
                         
                         # 1. Epipolar consistency loss
+                        print("computing Epipolar consistency loss")
                         F_pred = self._compute_fundamental_matrix(Vs_pred[i], Vs_pred[j], ts_pred[i], ts_pred[j])
                         epipolar_error = self._compute_epipolar_error(F_pred, pts1, pts2)
                         epipolar_loss = epipolar_loss + epipolar_error
                         
                         # 2. Geometric consistency loss (triangulation-based)
+                        print("computing Geometric consistency loss")
                         geometric_error = self._compute_geometric_consistency(
                             Vs_pred[i], Vs_pred[j], ts_pred[i], ts_pred[j], pts1, pts2
                         )
                         geometric_loss = geometric_loss + geometric_error
+                        print("epipolar_error ", epipolar_loss, "geometric_loss: ", geometric_error)
+        
                         
                         pair_count += 1
+                        print("pair_count: ", pair_count)
         
         # Normalize by number of pairs
         if pair_count > 0:
@@ -187,6 +194,8 @@ class PairwiseConsistencyLoss(nn.Module):
         # Combine losses
         total_loss = (self.epipolar_weight * epipolar_loss + 
                      self.geometric_weight * geometric_loss)
+
+        print("epipolar_loss ", epipolar_loss, "geometric_loss: ", geometric_loss)
         
         if epoch is not None and epoch % 1000 == 0:
             print(f"Pairwise Loss: {total_loss:.6f}, Epipolar: {epipolar_loss:.6f}, Geometric: {geometric_loss:.6f}")
@@ -254,7 +263,7 @@ class PairwiseConsistencyLoss(nn.Module):
             pts2_homo = pts2
         
         # Triangulate 3D points
-        X_3d = self._triangulate_points(P1, P2, pts1_homo, pts2_homo)
+        X_3d = cv2.triangulate_points(P1, P2, pts1_homo, pts2_homo)
         
         # Project back to both cameras
         pts1_proj = torch.bmm(P1, X_3d)
@@ -383,10 +392,9 @@ class CombinedLoss(nn.Module):
         # Check if pairwise loss is effectively zero (no pairwise data available)
         has_pairwise_data = (hasattr(data, 'relative_poses') and len(data.relative_poses) > 0) or \
                            (hasattr(data, 'matches') and len(data.matches) > 0)
-        
+        print("has_pairwise_data ", has_pairwise_data)
         # If no pairwise data is available, set pairwise weight to 0
         effective_pairwise_weight = self.pairwise_weight if has_pairwise_data else 0.0
-        print(effective_pairwise_weight, "!!!!!!!!!!!!!!!!!!!")
         # Reprojection loss (geometric loss)
         if self.alpha:
             ESFMLoss = self.weighted_ESFM_loss(pred_cam, pred_outliers, data)
@@ -402,6 +410,7 @@ class CombinedLoss(nn.Module):
 
 
         loss = self.alpha * ESFMLoss + self.beta * classificationLoss + effective_pairwise_weight * pairwiseLoss
+        print(loss)
 
         return loss
 

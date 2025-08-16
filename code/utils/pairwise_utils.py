@@ -15,13 +15,14 @@ def extract_pairwise_matches_from_scene(data, min_matches=8):
     Returns:
         matches_dict: Dictionary with keys (i, j) containing match data
     """
+    print("Extracting pairwise matches from scene data for computing relative poses")
     matches_dict = {}
     n_cameras = data.y.shape[0]
     
     # Extract 2D points for each camera
     M = data.M  # [2*m, n] where m is number of cameras
     valid_points = data.valid_pts
-    
+
     for i in range(n_cameras):
         for j in range(i + 1, n_cameras):
             # Get points visible in both cameras
@@ -31,7 +32,7 @@ def extract_pairwise_matches_from_scene(data, min_matches=8):
             # Find points visible in both cameras
             visible_i = pts_i[0, :] > 0
             visible_j = pts_j[0, :] > 0
-            visible_both = visible_i & visible_j & valid_points
+            visible_both = visible_i & visible_j 
             
             if visible_both.sum() < min_matches:
                 continue
@@ -49,6 +50,54 @@ def extract_pairwise_matches_from_scene(data, min_matches=8):
     return matches_dict
 
 
+# def extract_pairwise_matches_from_scene(data, min_matches=8):
+#     """
+#     Extract pairwise matches from scene data for computing relative poses.
+    
+#     Args:
+#         data: SceneData object containing M matrix and camera information
+#         min_matches: Minimum number of matches required for a pair
+        
+#     Returns:
+#         matches_dict: Dictionary with keys (i, j) containing match data
+#     """
+#     print("Extracting pairwise matches from scene data for computing relative poses - pairwise utils")
+#     matches_dict = {}
+#     n_cameras = data.y.shape[0]
+    
+#     # Extract 2D points for each camera
+#     M = data.M  # [2*m, n] where m is number of cameras
+#     valid_points = data.valid_pts  # optional if used
+
+#     # Precompute visibility mask for each camera
+#     # visible[i, :] = bool mask of points visible in camera i
+#     visible = (M[0::2, :] > 0)  # take only x-coordinates, shape [m, n]
+
+#     for i in range(n_cameras):
+#         pts_i = M[2*i:2*i+2, :]  # [2, n]
+
+#         # Compare i with all j > i at once
+#         common_visible = visible[i] & visible[i+1:]  # shape [m-i-1, n]
+
+#         # Count number of matches per pair
+#         num_matches = common_visible.sum(axis=1)
+
+#         # Filter pairs with enough matches
+#         valid_js = np.where(num_matches >= min_matches)[0] + (i+1)
+
+#         for idx, j in enumerate(valid_js):
+#             mask = common_visible[valid_js[idx] - (i+1)]
+#             pts1 = pts_i[:, mask]
+#             pts2 = M[2*j:2*j+2, :][:, mask]
+
+#             matches_dict[(i, j)] = {
+#                 'pts1': pts1,
+#                 'pts2': pts2,
+#                 'num_matches': pts1.shape[1]
+#             }
+
+#     return matches_dict
+
 def compute_relative_poses_for_scene(data, matches_dict=None, calibrated=True):
     """
     Compute relative poses for all camera pairs in a scene.
@@ -61,7 +110,9 @@ def compute_relative_poses_for_scene(data, matches_dict=None, calibrated=True):
     Returns:
         relative_poses: Dictionary with relative pose information
     """
+    
     if matches_dict is None:
+        print("matches_dict is Non", )
         matches_dict = extract_pairwise_matches_from_scene(data)
     
     n_cameras = data.y.shape[0]
