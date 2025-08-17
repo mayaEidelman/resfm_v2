@@ -1,3 +1,4 @@
+from turtle import shape
 import torch
 from utils import geo_utils
 from torch import nn
@@ -160,28 +161,23 @@ class PairwiseConsistencyLoss(nn.Module):
             for j in range(i + 1, n_cameras):
                 if (i, j) in data.matches:
                     matches_ij = data.matches[(i, j)]
-                    print("len(matches_ij['pts1']) > 8", len(matches_ij['pts1']) )
-                    if len(matches_ij['pts1']) > 8:  # Need at least 8 points for fundamental matrix
+                    if matches_ij['num_matches'] > 8:  # Need at least 8 points for fundamental matrix
                         pts1 = matches_ij['pts1']
                         pts2 = matches_ij['pts2']
                         
                         # 1. Epipolar consistency loss
-                        print("computing Epipolar consistency loss")
-                        F_pred = self._compute_fundamental_matrix(Vs_pred[i], Vs_pred[j], ts_pred[i], ts_pred[j])
+                        F_pred = geo_utils.get_fundamental_from_V_t(Vs_pred[i], Vs_pred[j], ts_pred[i], ts_pred[j])
                         epipolar_error = self._compute_epipolar_error(F_pred, pts1, pts2)
                         epipolar_loss = epipolar_loss + epipolar_error
                         
                         # 2. Geometric consistency loss (triangulation-based)
-                        print("computing Geometric consistency loss")
                         geometric_error = self._compute_geometric_consistency(
                             Vs_pred[i], Vs_pred[j], ts_pred[i], ts_pred[j], pts1, pts2
                         )
                         geometric_loss = geometric_loss + geometric_error
-                        print("epipolar_error ", epipolar_loss, "geometric_loss: ", geometric_error)
         
                         
                         pair_count += 1
-                        print("pair_count: ", pair_count)
         
         # Normalize by number of pairs
         if pair_count > 0:
@@ -194,8 +190,6 @@ class PairwiseConsistencyLoss(nn.Module):
         # Combine losses
         total_loss = (self.epipolar_weight * epipolar_loss + 
                      self.geometric_weight * geometric_loss)
-
-        print("epipolar_loss ", epipolar_loss, "geometric_loss: ", geometric_loss)
         
         if epoch is not None and epoch % 1000 == 0:
             print(f"Pairwise Loss: {total_loss:.6f}, Epipolar: {epipolar_loss:.6f}, Geometric: {geometric_loss:.6f}")
@@ -226,14 +220,16 @@ class PairwiseConsistencyLoss(nn.Module):
     def _compute_epipolar_error(self, F, pts1, pts2):
         """Compute symmetric epipolar distance."""
         # Ensure points are in homogeneous coordinates
+        pts1 = pts1.to(F.device)
+        pts2 = pts2.to(F.device)
         if pts1.shape[0] == 2:
-            pts1 = torch.cat([pts1, torch.ones(1, pts1.shape[1], device=pts1.device)], dim=0)
+            pts1 = torch.cat([pts1, torch.ones(1, pts1.shape[1], device=F.device)], dim=0)
         if pts2.shape[0] == 2:
-            pts2 = torch.cat([pts2, torch.ones(1, pts2.shape[1], device=pts2.device)], dim=0)
+            pts2 = torch.cat([pts2, torch.ones(1, pts2.shape[1], device=F.device)], dim=0)
         
         # Compute epipolar lines
-        lines1 = torch.bmm(F, pts2)  # F * x2
-        lines2 = torch.bmm(F.transpose(1, 2), pts1)  # F^T * x1
+        lines1 = F @ pts2  # F * x2
+        lines2 = F.T @ pts1  # F^T * x1
         
         # Compute distances
         dist1 = torch.abs(torch.sum(pts1 * lines1, dim=0)) / torch.norm(lines1[:2, :], dim=0)
@@ -247,9 +243,13 @@ class PairwiseConsistencyLoss(nn.Module):
         Compute geometric consistency loss based on triangulation and reprojection.
         This enforces that the predicted poses are consistent with the observed matches.
         """
+        device = V1.device
+        pts1 = pts1.to(device)
+        pts2 = pts2.to(device)
         # Create camera matrices for triangulation
-        P1 = torch.eye(3, 4, device=V1.device)  # First camera at origin
-        P2 = torch.cat([V2.transpose(1, 2), -torch.bmm(V2.transpose(1, 2), t2.unsqueeze(-1))], dim=2)
+        P1 = torch.eye(3, 4, device=device)  # First camera at origin
+        # P2 = torch.cat([V2.transpose(1, 2), -torch.bmm(V2.transpose(1, 2), t2.unsqueeze(-1))], dim=2)
+        P2 = geo_utils.get_camera_matrix_from_Vt(V2, t2)
         
         # Ensure points are in homogeneous coordinates
         if pts1.shape[0] == 2:
@@ -263,11 +263,10 @@ class PairwiseConsistencyLoss(nn.Module):
             pts2_homo = pts2
         
         # Triangulate 3D points
-        X_3d = cv2.triangulate_points(P1, P2, pts1_homo, pts2_homo)
-        
+        X_3d = self._triangulate_points(P1, P2, pts1_homo, pts2_homo) # checck the use of pred_cam['pts3D']
         # Project back to both cameras
-        pts1_proj = torch.bmm(P1, X_3d)
-        pts2_proj = torch.bmm(P2, X_3d)
+        pts1_proj = P1 @ X_3d
+        pts2_proj = P2 @ X_3d
         
         # Normalize homogeneous coordinates
         pts1_proj = pts1_proj[:2, :] / pts1_proj[2, :].unsqueeze(0)
@@ -278,8 +277,8 @@ class PairwiseConsistencyLoss(nn.Module):
         reproj_error2 = torch.norm(pts2[:2, :] - pts2_proj, dim=0)
         
         # Check if points are in front of cameras (positive depth)
-        depth1 = torch.bmm(P1[2:3, :], X_3d).squeeze()
-        depth2 = torch.bmm(P2[2:3, :], X_3d).squeeze()
+        depth1 = P1[2:3, :] @ X_3d
+        depth2 = P2[2:3, :] @ X_3d
         
         # Penalize points behind cameras
         behind_camera_penalty = torch.mean(torch.relu(-depth1) + torch.relu(-depth2))

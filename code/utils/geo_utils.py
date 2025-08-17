@@ -237,7 +237,7 @@ def get_camera_matrix_from_Vt(V, t):
     :param t: Camera Position
     :return: Camera matrix
     """
-	return torch.inverse(V).T @ torch.cat((torch.eye(3), -t), dim=1)
+	return torch.inverse(V).T @ torch.cat((torch.eye(3, device=t.device), -t.view(3, 1)), dim=1)
 
 
 def batch_get_camera_matrix_from_Vt(Vs, ts):
