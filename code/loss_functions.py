@@ -148,7 +148,6 @@ class PairwiseConsistencyLoss(nn.Module):
         
         # Check if we have matches available
         has_matches = hasattr(data, 'matches') and len(data.matches) > 0
-        print("has_matches?", has_matches, len(data.matches))
         
         # If no pairwise data is available, return zero loss
         if not has_matches:
@@ -190,32 +189,14 @@ class PairwiseConsistencyLoss(nn.Module):
         # Combine losses
         total_loss = (self.epipolar_weight * epipolar_loss + 
                      self.geometric_weight * geometric_loss)
+        print(f"Pairwise Loss: {total_loss:.6f}, Epipolar: {epipolar_loss:.6f}, Geometric: {geometric_loss:.6f}")
+        
         
         if epoch is not None and epoch % 1000 == 0:
             print(f"Pairwise Loss: {total_loss:.6f}, Epipolar: {epipolar_loss:.6f}, Geometric: {geometric_loss:.6f}")
         
         return total_loss
     
-    def _compute_fundamental_matrix(self, V1, V2, t1, t2):
-        """Compute fundamental matrix from two camera poses."""
-        # Get cross product matrices
-        t1_cross = torch.tensor([[0, -t1[2], t1[1]], 
-                                [t1[2], 0, -t1[0]], 
-                                [-t1[1], t1[0], 0]], device=t1.device)
-        t2_cross = torch.tensor([[0, -t2[2], t2[1]], 
-                                [t2[2], 0, -t2[0]], 
-                                [-t2[1], t2[0], 0]], device=t2.device)
-        
-        # Compute essential matrix
-        E = torch.bmm(V1.transpose(1, 2), torch.bmm(t1_cross - t2_cross, V2))
-        
-        # For calibrated case, fundamental matrix is same as essential matrix
-        if self.calibrated:
-            return E
-        else:
-            # For uncalibrated case, need to account for unknown intrinsics
-            # This is a simplified version - in practice you'd need the actual K matrices
-            return E
     
     def _compute_epipolar_error(self, F, pts1, pts2):
         """Compute symmetric epipolar distance."""
@@ -391,7 +372,6 @@ class CombinedLoss(nn.Module):
         # Check if pairwise loss is effectively zero (no pairwise data available)
         has_pairwise_data = (hasattr(data, 'relative_poses') and len(data.relative_poses) > 0) or \
                            (hasattr(data, 'matches') and len(data.matches) > 0)
-        print("has_pairwise_data ", has_pairwise_data)
         # If no pairwise data is available, set pairwise weight to 0
         effective_pairwise_weight = self.pairwise_weight if has_pairwise_data else 0.0
         # Reprojection loss (geometric loss)
