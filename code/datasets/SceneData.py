@@ -9,7 +9,6 @@ import traceback
 
 class SceneData:
     def __init__(self, M, Ns, Ps_gt, scan_name, dilute_M=False, outliers=None, dict_info=None, nameslist=None, M_original=None, compute_pairwise=True, is_calibrated=True):
-        print("initializing SceneData")
         if M_original is None:
             M_original = M.detach().clone()
 
@@ -54,7 +53,6 @@ class SceneData:
 
         # Stats of the scene
         self.dict_info = dict_info
-        print("initializing SceneData done")
 
     def _compute_pairwise_data(self):
         """Compute pairwise matches and relative poses for this scene."""
