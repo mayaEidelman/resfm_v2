@@ -98,6 +98,50 @@ def extract_pairwise_matches_from_scene(data, min_matches=8):
 
     return matches_dict
 
+def fast_pairwise_matches_from_sparse(data, min_matches=8):
+    # Sparse visibility (cameras x points)
+    cam_idx = data.x.indices[0]          # [Nobs]
+    pt_idx  = data.x.indices[1]          # [Nobs]
+    m, n, _ = data.x.mat_shape
+    vals = torch.ones_like(cam_idx, dtype=torch.float32)
+    A = torch.sparse_coo_tensor(
+        torch.stack([cam_idx, pt_idx], dim=0),
+        vals, size=(m, n)
+    ).coalesce()
+
+    # Shared counts for all pairs
+    counts = torch.sparse.mm(A, A.transpose(0, 1)).to_dense()  # [m, m]
+    iu = torch.triu(torch.ones_like(counts, dtype=torch.bool), diagonal=1)
+    valid_pairs = torch.nonzero((counts >= min_matches) & iu, as_tuple=False)
+
+    # Preindex observations for quick lookup
+    # Build per-camera arrays of (point_ids, index_in_sparse_values)
+    obs_index = torch.arange(cam_idx.numel(), device=cam_idx.device)
+    per_cam_pts = [pt_idx[cam_idx == i].cpu().numpy() for i in range(m)]
+    per_cam_obs = [obs_index[cam_idx == i].cpu().numpy() for i in range(m)]
+
+    matches = {}
+    for i, j in valid_pairs.cpu().numpy():
+        pts_i, obs_i = per_cam_pts[i], per_cam_obs[i]
+        pts_j, obs_j = per_cam_pts[j], per_cam_obs[j]
+
+        common_pts, idx_i, idx_j = np.intersect1d(pts_i, pts_j, assume_unique=False, return_indices=True)
+        if common_pts.size < min_matches:
+            continue
+
+        # Use indices to pick rows in data.x.values (normalized coords)
+        v_i = data.x.values[obs_i[idx_i]]  # [k, 2]
+        v_j = data.x.values[obs_j[idx_j]]  # [k, 2]
+
+        matches[(i, j)] = {
+            'pts1': v_i.T.contiguous(),     # [2, k]
+            'pts2': v_j.T.contiguous(),     # [2, k]
+            'num_matches': v_i.shape[0],
+            'point_ids': torch.from_numpy(common_pts)
+        }
+
+    return matches
+
 def compute_relative_poses_for_scene(data, matches_dict=None, calibrated=True):
     """
     Compute relative poses for all camera pairs in a scene.
@@ -132,7 +176,7 @@ def compute_relative_poses_for_scene(data, matches_dict=None, calibrated=True):
         
         # Compute relative pose
         R, t, inliers = geo_utils.compute_relative_pose_from_matches(
-            pts1, pts2, K1, K2, method='8pt' if calibrated else '8pt'
+            pts1, pts2, K1, K2, method='5pt' if calibrated else '8pt'
         )
         
         if R is not None and t is not None:
@@ -172,7 +216,7 @@ def add_pairwise_data_to_scene(data, calibrated=True):
     
     # Add to data object
     data.matches = matches_dict
-    data.relative_poses = relative_poses
+    # data.relative_poses = relative_poses
     
     return data
 
@@ -299,3 +343,75 @@ def evaluate_pairwise_consistency(data, pred_cam):
     }
     
     return metrics 
+
+def compute_absolute_pose_consistency(pred_cam, data, calibrated=True, device=None):
+        """
+        Compute absolute pose consistency loss using the same method as evaluation.py.
+        This aligns predicted poses with ground truth and computes rotation/translation errors.
+        """
+        if not calibrated:
+            return torch.tensor(0.0, device=pred_cam["Ps_norm"].device, requires_grad=True)
+        
+        # Extract predicted poses using the same method as evaluation.py
+        Ps_norm = pred_cam["Ps_norm"]  # [m, 3, 4]
+        
+        # Convert to numpy for geo_utils functions (they expect numpy)
+        Ps_norm_np = Ps_norm.detach().cpu().numpy()
+        
+        # Decompose camera matrices to get rotations and translations
+        Rs_pred_np, ts_pred_np = geo_utils.decompose_camera_matrix(Ps_norm_np)
+        
+        # Get ground truth poses
+        Ns_inv = data.Ns_invT.transpose(1, 2).cpu().numpy()
+        Rs_gt_np, ts_gt_np = geo_utils.decompose_camera_matrix(data.y.cpu().numpy(), Ns_inv)
+        
+        # Align predicted poses with ground truth using the same alignment as evaluation.py
+        Rs_fixed_np, ts_fixed_np, _ = geo_utils.align_cameras(
+            Rs_pred_np, Rs_gt_np, ts_pred_np, ts_gt_np, return_alignment=True
+        )
+        
+        # Compute rotation and translation errors
+        Rs_error_np, ts_error_np = geo_utils.tranlsation_rotation_errors(
+            Rs_fixed_np, ts_fixed_np, Rs_gt_np, ts_gt_np
+        )
+        
+        # Convert back to tensors
+        Rs_error = torch.from_numpy(Rs_error_np).float().to(device)
+        ts_error = torch.from_numpy(ts_error_np).float().to(device)
+        
+        # Compute mean errors (same as evaluation.py)
+        rotation_loss = Rs_error.mean()
+        translation_loss = ts_error.mean()
+        
+        return rotation_loss, translation_loss
+
+def compute_epipolar_constraint_error(F, pts1, pts2):
+    """
+    Compute epipolar constraint error using fundamental matrix.
+    
+    Args:
+        F: Fundamental matrix [3, 3]
+        pts1: Points in first image [2, N] or [3, N]
+        pts2: Points in second image [2, N] or [3, N]
+        
+    Returns:
+        error: Mean epipolar error
+    """
+    """Compute symmetric epipolar distance."""
+        # Ensure points are in homogeneous coordinates
+    pts1 = pts1.to(F.device)
+    pts2 = pts2.to(F.device)
+    if pts1.shape[0] == 2:
+        pts1 = torch.cat([pts1, torch.ones(1, pts1.shape[1], device=F.device)], dim=0)
+    if pts2.shape[0] == 2:
+        pts2 = torch.cat([pts2, torch.ones(1, pts2.shape[1], device=F.device)], dim=0)
+    
+    # Compute epipolar lines
+    lines1 = F @ pts2  # F * x2
+    lines2 = F.T @ pts1  # F^T * x1
+    
+    # Compute distances
+    dist1 = torch.abs(torch.sum(pts1 * lines1, dim=0)) / torch.norm(lines1[:2, :], dim=0)
+    dist2 = torch.abs(torch.sum(pts2 * lines2, dim=0)) / torch.norm(lines2[:2, :], dim=0)
+    # Symmetric epipolar distance
+    return torch.median(dist1 + dist2) # I changed here to median instead of meanto make it more robust to outliers but dont know it its ok :/

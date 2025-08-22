@@ -597,43 +597,6 @@ def batch_compute_relative_poses(matches_dict, Ks=None):
     return relative_poses
 
 
-def compute_epipolar_constraint_error(F, pts1, pts2):
-    """
-    Compute epipolar constraint error using fundamental matrix.
-    
-    Args:
-        F: Fundamental matrix [3, 3]
-        pts1: Points in first image [2, N] or [3, N]
-        pts2: Points in second image [2, N] or [3, N]
-        
-    Returns:
-        error: Mean epipolar error
-    """
-    if isinstance(F, torch.Tensor):
-        F = F.cpu().numpy()
-    if isinstance(pts1, torch.Tensor):
-        pts1 = pts1.cpu().numpy()
-    if isinstance(pts2, torch.Tensor):
-        pts2 = pts2.cpu().numpy()
-    
-    # Ensure points are in homogeneous coordinates
-    if pts1.shape[0] == 2:
-        pts1 = np.vstack([pts1, np.ones((1, pts1.shape[1]))])
-    if pts2.shape[0] == 2:
-        pts2 = np.vstack([pts2, np.ones((1, pts2.shape[1]))])
-    
-    # Compute epipolar lines
-    lines1 = F @ pts2  # F * x2
-    lines2 = F.T @ pts1  # F^T * x1
-    
-    # Compute distances
-    dist1 = np.abs(np.sum(pts1 * lines1, axis=0)) / np.linalg.norm(lines1[:2, :], axis=0)
-    dist2 = np.abs(np.sum(pts2 * lines2, axis=0)) / np.linalg.norm(lines2[:2, :], axis=0)
-    
-    # Symmetric epipolar distance
-    return np.mean(dist1 + dist2)
-
-
 def validate_relative_pose(R, t, pts1, pts2, K1=None, K2=None, threshold=4.0):
     """
     Validate relative pose by checking if points triangulate in front of both cameras.

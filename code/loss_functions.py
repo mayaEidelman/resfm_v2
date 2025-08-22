@@ -1,6 +1,6 @@
 from turtle import shape
 import torch
-from utils import geo_utils
+from utils import geo_utils, pairwise_utils
 from torch import nn
 from torch.nn import functional as F
 import cv2
@@ -139,132 +139,137 @@ class PairwiseConsistencyLoss(nn.Module):
             Total pairwise consistency loss
         """
         Ps_pred = pred_cam["Ps_norm"]  # [m, 3, 4] predicted camera matrices
-        # n_cameras = Ps_pred.shape[0]
+        n_cameras = Ps_pred.shape[0]
         
-        # # Extract predicted rotations and camera centers
-        # Vs_pred = Ps_pred[:, 0:3, 0:3].inverse().transpose(1, 2)  # [m, 3, 3]
-        # ts_pred = torch.bmm(-Vs_pred.transpose(1, 2), Ps_pred[:, 0:3, 3].unsqueeze(dim=-1)).squeeze()  # [m, 3]
+        # Extract predicted rotations and camera centers
+        Vs_pred = Ps_pred[:, 0:3, 0:3].inverse().transpose(1, 2)  # [m, 3, 3]
+        ts_pred = torch.bmm(-Vs_pred.transpose(1, 2), Ps_pred[:, 0:3, 3].unsqueeze(dim=-1)).squeeze()  # [m, 3]
         
         # Initialize loss components
-        # epipolar_loss = torch.tensor(0.0, device=Ps_pred.device, requires_grad=True)
-        # geometric_loss = torch.tensor(0.0, device=Ps_pred.device, requires_grad=True)
-        # pairwise_loss = torch.tensor(0.0, device=Ps_pred.device, requires_grad=True)
+        epipolar_loss = torch.tensor(0.0, device=Ps_pred.device, requires_grad=True)
+        geometric_loss = torch.tensor(0.0, device=Ps_pred.device, requires_grad=True)
+        pairwise_loss = torch.tensor(0.0, device=Ps_pred.device, requires_grad=True)
         
         # Check if we have matches available
-        # has_matches = hasattr(data, 'matches') and len(data.matches) > 0
+        has_matches = hasattr(data, 'matches') and len(data.matches) > 0
         
         # If no pairwise data is available, return zero loss
-        # if not has_matches:
-        #     return torch.tensor(0.0, device=Ps_pred.device, requires_grad=True)
+        if not has_matches:
+            return torch.tensor(0.0, device=Ps_pred.device, requires_grad=True)
         
-        # # Get camera intrinsics if available
-        # Ns = data.Ns.cpu().numpy()
-        # K = data.Ns_invT.transpose(1, 2).cpu().numpy()
+        # Get camera intrinsics if available
+        Ns = data.Ns.cpu().numpy()
+        K = data.Ns_invT.transpose(1, 2).cpu().numpy()
 
         
         # Compute pairwise consistency for all camera pairs
-        # pair_count = 0
+        pair_count = 0
         
-        # for i in range(n_cameras):
-        #     for j in range(i + 1, n_cameras):
-        #         if (i, j) in data.matches:
-        #             matches_ij = data.matches[(i, j)]
-        #             if matches_ij['num_matches'] > 8:  # Need at least 8 points for essential matrix
-        #                 pts1 = matches_ij['pts1']
-        #                 pts2 = matches_ij['pts2']
+        for i in range(n_cameras):
+            for j in range(i + 1, n_cameras):
+                if (i, j) in data.matches:
+                    matches_ij = data.matches[(i, j)]
+                    if matches_ij['num_matches'] > 8:  # Need at least 8 points for essential matrix
+                        pts1 = matches_ij['pts1']
+                        pts2 = matches_ij['pts2']
                         
-        #                 # 1. Epipolar consistency loss
-        #                 F_pred = geo_utils.get_fundamental_from_V_t(Vs_pred[i], Vs_pred[j], ts_pred[i], ts_pred[j])
-        #                 epipolar_error = self._compute_epipolar_error(F_pred, pts1, pts2)
-        #                 epipolar_loss = epipolar_loss + epipolar_error
+                        # 1. Epipolar consistency loss
+                        F_pred = geo_utils.get_fundamental_from_V_t(Vs_pred[i], Vs_pred[j], ts_pred[i], ts_pred[j])
+                        epipolar_error = pairwise_utils.compute_epipolar_constraint_error(F_pred, pts1, pts2)
+                        epipolar_loss = epipolar_loss + epipolar_error
                         
                         # 2. Geometric consistency loss (existing)
-                        # geometric_error = self._compute_geometric_consistency_from_pred(
-                        #     pred_cam, data, i, j
-                        # )
-                        # geometric_loss = geometric_loss + geometric_error
+                        geometric_error = self._compute_geometric_consistency_from_pred(
+                            pred_cam, data, i, j
+                        )
+                        geometric_loss = geometric_loss + geometric_error
                         
-                        # # 3. Relative pose consistency loss
-                        # # Check if we already computed the relative pose/fundamental matrix for this pair
-                        # if ("R_gt" not in matches_ij or "t_gt" not in matches_ij) and "F_gt" not in matches_ij:
-                        #     # Compute ground truth relative pose from essential matrix or fundamental matrix
-                        #     try:
-                        #         result1, result2 = self._compute_ground_truth_relative_pose(pts1, pts2, K[i] if K is not None else None)
-                        #         if result1 is not None:
-                        #             if result2 is not None:
-                        #                 # We got R, t (essential matrix case)
-                        #                 matches_ij["R_gt"] = torch.from_numpy(result1).float()
-                        #                 matches_ij["t_gt"] = torch.from_numpy(result2.ravel()).float()
-                        #             else:
-                        #                 # We got F, None (fundamental matrix case)
-                        #                 print(f"Computed fundamental matrix for pair ({i}, {j})")
-                        #                 matches_ij["F_gt"] = torch.from_numpy(result1).float()
-                        #         else:
-                        #             # Skip this pair if computation failed
-                        #             continue
-                        #     except Exception as e:
-                        #         print(f"Warning: Failed to compute relative pose/fundamental matrix for pair ({i}, {j}): {e}")
-                        #         # If computation fails, skip this pair
-                        #         continue
+                        # 3. Relative pose consistency loss
+                        # Check if we already computed the relative pose/fundamental matrix for this pair
+                        if ("R_gt" not in matches_ij or "t_gt" not in matches_ij) and "F_gt" not in matches_ij:
+                            # Compute ground truth relative pose from essential matrix or fundamental matrix
+                            try:
+                                result1, result2 = self._compute_ground_truth_relative_pose(pts1, pts2, K[i] if K is not None else None)
+                                if result1 is not None:
+                                    if result2 is not None:
+                                        # We got R, t (essential matrix case)
+                                        matches_ij["R_gt"] = torch.from_numpy(result1).float()
+                                        matches_ij["t_gt"] = torch.from_numpy(result2.ravel()).float()
+                                    else:
+                                        # We got F, None (fundamental matrix case)
+                                        print(f"Computed fundamental matrix for pair ({i}, {j})")
+                                        matches_ij["F_gt"] = torch.from_numpy(result1).float()
+                                else:
+                                    # Skip this pair if computation failed
+                                    continue
+                            except Exception as e:
+                                print(f"Warning: Failed to compute relative pose/fundamental matrix for pair ({i}, {j}): {e}")
+                                # If computation fails, skip this pair
+                                continue
                         
-                        # # Handle both relative pose (R,t) and fundamental matrix (F) cases
-                        # if "R_gt" in matches_ij and "t_gt" in matches_ij:
-                        #     # Relative pose consistency loss (when camera intrinsics available)
-                        #     R_gt = matches_ij["R_gt"].to(Ps_pred.device)
-                        #     t_gt = matches_ij["t_gt"].to(Ps_pred.device)
+                        # Handle both relative pose (R,t) and fundamental matrix (F) cases
+                        if "R_gt" in matches_ij and "t_gt" in matches_ij:
+                            # Relative pose consistency loss (when camera intrinsics available)
+                            R_gt = matches_ij["R_gt"].to(Ps_pred.device)
+                            t_gt = matches_ij["t_gt"].to(Ps_pred.device)
                             
-                        #     # Compute consistency losses
-                        #     rot_loss, trans_loss = geo_utils.tranlsation_rotation_errors(
-                        #         Vs_pred[i], Vs_pred[j],
-                        #         ts_pred[i], ts_pred[j],
-                        #         R_gt, t_gt
-                        #     )
+                            # Compute consistency losses
+                            rot_loss, trans_loss = self._compute_pairwise_consistency(
+                                Vs_pred[i], Vs_pred[j],
+                                ts_pred[i], ts_pred[j],
+                                R_gt, t_gt
+                            )
 
-                        #     consistency_loss = (self.rotation_weight * rot_loss + 
-                        #                       self.translation_weight * trans_loss)
-                        #     pairwise_loss = pairwise_loss + consistency_loss
+                            consistency_loss = (self.rotation_weight * rot_loss + 
+                                              self.translation_weight * trans_loss)
+                            pairwise_loss = pairwise_loss + consistency_loss
                             
-                        # elif "F_gt" in matches_ij:
-                        #     print("no R_gt and t_gt then computing loss from F_gt")
-                        #     # Fundamental matrix consistency loss (when no camera intrinsics)
-                        #     F_gt = matches_ij["F_gt"].to(Ps_pred.device)
-                        #     # F_pred = geo_utils.get_fundamental_from_V_t(Vs_pred[i], Vs_pred[j], ts_pred[i], ts_pred[j])
+                        elif "F_gt" in matches_ij:
+                            print("no R_gt and t_gt then computing loss from F_gt")
+                            # Fundamental matrix consistency loss (when no camera intrinsics)
+                            F_gt = matches_ij["F_gt"].to(Ps_pred.device)
+                            # F_pred = geo_utils.get_fundamental_from_V_t(Vs_pred[i], Vs_pred[j], ts_pred[i], ts_pred[j])
                             
-                        #     # Compare ground truth and predicted fundamental matrices
-                        #     # Use Frobenius norm of the difference, normalized by F_gt norm
-                        #     F_diff = F_pred - F_gt
-                        #     fundamental_loss = torch.norm(F_diff, 'fro') / (torch.norm(F_gt, 'fro') + 1e-8)
-                        #     pairwise_loss = pairwise_loss + fundamental_loss
+                            # Compare ground truth and predicted fundamental matrices
+                            # Use Frobenius norm of the difference, normalized by F_gt norm
+                            F_diff = F_pred - F_gt
+                            fundamental_loss = torch.norm(F_diff, 'fro') / (torch.norm(F_gt, 'fro') + 1e-8)
+                            pairwise_loss = pairwise_loss + fundamental_loss
                         
-                        # pair_count += 1
+                        pair_count += 1
         
         # Normalize by number of pairs
-        # if pair_count > 0:
-        #     epipolar_loss = epipolar_loss / pair_count
-        #     # pairwise_loss = pairwise_loss / pair_count
-            # geometric_loss = geometric_loss / pair_count
-        # else:
-        #     # If no valid pairs, return zero loss
-        #     return torch.tensor(0.0, device=Ps_pred.device, requires_grad=True)
+        if pair_count > 0:
+            epipolar_loss = epipolar_loss / pair_count
+            # pairwise_loss = pairwise_loss / pair_count
+            geometric_loss = geometric_loss / pair_count
+        else:
+            # If no valid pairs, return zero loss
+            return torch.tensor(0.0, device=Ps_pred.device, requires_grad=True)
         
         # Compute absolute pose consistency loss (same as evaluation.py)
-        absolute_pose_loss = torch.tensor(0.0, device=Ps_pred.device, requires_grad=True)
+        absolute_pose_loss = self.absolut_Rt_loss(pred_cam, data, Ps_pred.device)
+
+        # Combine losses
+        total_loss = (self.epipolar_weight * epipolar_loss + 
+                     self.pairwise_weight * pairwise_loss +
+                     self.absolute_pose_weight * absolute_pose_loss)
+        
+        if epoch is not None and epoch % 1000 == 0:
+            print(f"Pairwise Loss: {total_loss:.6f}, Epipolar: {epipolar_loss:.6f}, "
+                  f"Pairwise Consistency: {pairwise_loss:.6f}, Absolute Pose: {absolute_pose_loss:.6f}")
+        
+        return total_loss
+
+    def absolut_Rt_loss(self, pred_cam, data, device):
+        absolute_pose_loss = torch.tensor(0.0, device=device, requires_grad=True)
         if self.absolute_pose_weight > 0.0:
             try:
-                rotation_loss, translation_loss = self._compute_absolute_pose_consistency(pred_cam, data)
+                rotation_loss, translation_loss = pairwise_utils.compute_absolute_pose_consistency(pred_cam, data, self.calibrated, device)
                 absolute_pose_loss = rotation_loss + translation_loss
             except Exception as e:
                 print(f"Warning: Failed to compute absolute pose consistency loss: {e}")
-                absolute_pose_loss = torch.tensor(0.0, device=Ps_pred.device, requires_grad=True)
-        
-        # Combine losses
-        # total_loss = (self.epipolar_weight * epipolar_loss + 
-        #              self.pairwise_weight * pairwise_loss +
-        #              self.absolute_pose_weight * absolute_pose_loss)
-        
-        # if epoch is not None and epoch % 1000 == 0:
-        #     print(f"Pairwise Loss: {total_loss:.6f}, Epipolar: {epipolar_loss:.6f}, "
-        #           f"Pairwise Consistency: {pairwise_loss:.6f}, Absolute Pose: {absolute_pose_loss:.6f}")
+                absolute_pose_loss = torch.tensor(0.0, device=device, requires_grad=True)
         
         return absolute_pose_loss
     
@@ -292,49 +297,6 @@ class PairwiseConsistencyLoss(nn.Module):
 
         return rot_loss, trans_loss
     
-    def _compute_absolute_pose_consistency(self, pred_cam, data):
-        """
-        Compute absolute pose consistency loss using the same method as evaluation.py.
-        This aligns predicted poses with ground truth and computes rotation/translation errors.
-        """
-        if not self.calibrated:
-            return torch.tensor(0.0, device=pred_cam["Ps_norm"].device, requires_grad=True)
-        
-        device = pred_cam["Ps_norm"].device
-        
-        # Extract predicted poses using the same method as evaluation.py
-        Ps_norm = pred_cam["Ps_norm"]  # [m, 3, 4]
-        
-        # Convert to numpy for geo_utils functions (they expect numpy)
-        Ps_norm_np = Ps_norm.detach().cpu().numpy()
-        
-        # Decompose camera matrices to get rotations and translations
-        Rs_pred_np, ts_pred_np = geo_utils.decompose_camera_matrix(Ps_norm_np)
-        
-        # Get ground truth poses
-        Ns_inv = data.Ns_invT.transpose(1, 2).cpu().numpy()
-        Rs_gt_np, ts_gt_np = geo_utils.decompose_camera_matrix(data.y.cpu().numpy(), Ns_inv)
-        
-        # Align predicted poses with ground truth using the same alignment as evaluation.py
-        Rs_fixed_np, ts_fixed_np, _ = geo_utils.align_cameras(
-            Rs_pred_np, Rs_gt_np, ts_pred_np, ts_gt_np, return_alignment=True
-        )
-        
-        # Compute rotation and translation errors
-        Rs_error_np, ts_error_np = geo_utils.tranlsation_rotation_errors(
-            Rs_fixed_np, ts_fixed_np, Rs_gt_np, ts_gt_np
-        )
-        
-        # Convert back to tensors
-        Rs_error = torch.from_numpy(Rs_error_np).float().to(device)
-        ts_error = torch.from_numpy(ts_error_np).float().to(device)
-        
-        # Compute mean errors (same as evaluation.py)
-        rotation_loss = Rs_error.mean()
-        translation_loss = ts_error.mean()
-        
-        return rotation_loss, translation_loss
-    
     def _geodesic_distance(self, R1, R2, eps=1e-7):
         """
         Geodesic distance between two rotations.
@@ -359,26 +321,6 @@ class PairwiseConsistencyLoss(nn.Module):
         t2 = t2 / (t2.norm() + eps)
         return 1.0 - torch.abs(torch.dot(t1, t2))
     
-    def _compute_epipolar_error(self, F, pts1, pts2):
-        """Compute symmetric epipolar distance."""
-        # Ensure points are in homogeneous coordinates
-        pts1 = pts1.to(F.device)
-        pts2 = pts2.to(F.device)
-        if pts1.shape[0] == 2:
-            pts1 = torch.cat([pts1, torch.ones(1, pts1.shape[1], device=F.device)], dim=0)
-        if pts2.shape[0] == 2:
-            pts2 = torch.cat([pts2, torch.ones(1, pts2.shape[1], device=F.device)], dim=0)
-        
-        # Compute epipolar lines
-        lines1 = F @ pts2  # F * x2
-        lines2 = F.T @ pts1  # F^T * x1
-        
-        # Compute distances
-        dist1 = torch.abs(torch.sum(pts1 * lines1, dim=0)) / torch.norm(lines1[:2, :], dim=0)
-        dist2 = torch.abs(torch.sum(pts2 * lines2, dim=0)) / torch.norm(lines2[:2, :], dim=0)
-        # Symmetric epipolar distance
-        return torch.median(dist1 + dist2) # I changed here to median instead of meanto make it more robust to outliers but dont know it its ok :/
-
     def _compute_geometric_consistency_from_pred(self, pred_cam, data, i, j):
         """
         Compute geometric consistency loss by reprojecting the model's predicted 3D points
@@ -448,81 +390,6 @@ class PairwiseConsistencyLoss(nn.Module):
 
         return geometric_loss
 
-    def _compute_geometric_consistency(self, V1, V2, t1, t2, pts1, pts2):
-        """
-        Compute geometric consistency loss based on triangulation and reprojection.
-        This enforces that the predicted poses are consistent with the observed matches.
-        """
-        device = V1.device
-        pts1 = pts1.to(device)
-        pts2 = pts2.to(device)
-        # Create camera matrices for triangulation
-        P1 = torch.eye(3, 4, device=device)  # First camera at origin
-        P2 = geo_utils.get_camera_matrix_from_Vt(V2, t2)
-        
-        # Ensure points are in homogeneous coordinates
-        if pts1.shape[0] == 2:
-            pts1_homo = torch.cat([pts1, torch.ones(1, pts1.shape[1], device=pts1.device)], dim=0)
-        else:
-            pts1_homo = pts1
-            
-        if pts2.shape[0] == 2:
-            pts2_homo = torch.cat([pts2, torch.ones(1, pts2.shape[1], device=pts2.device)], dim=0)
-        else:
-            pts2_homo = pts2
-        
-        # Triangulate 3D points
-        X_3d = self._triangulate_points(P1, P2, pts1_homo, pts2_homo)
-        # Project back to both cameras
-        pts1_proj = P1 @ X_3d
-        pts2_proj = P2 @ X_3d
-        
-        # Normalize homogeneous coordinates
-        pts1_proj = pts1_proj[:2, :] / pts1_proj[2, :].unsqueeze(0)
-        pts2_proj = pts2_proj[:2, :] / pts2_proj[2, :].unsqueeze(0)
-        
-        # Compute reprojection errors
-        reproj_error1 = torch.norm(pts1[:2, :] - pts1_proj, dim=0)
-        reproj_error2 = torch.norm(pts2[:2, :] - pts2_proj, dim=0)
-        
-        # Check if points are in front of cameras (positive depth)
-        depth1 = P1[2:3, :] @ X_3d
-        depth2 = P2[2:3, :] @ X_3d
-        
-        # Penalize points behind cameras
-        behind_camera_penalty = torch.mean(torch.relu(-depth1) + torch.relu(-depth2))
-        
-        # Total geometric consistency loss
-        reproj_loss = torch.mean(reproj_error1 + reproj_error2)
-        geometric_loss = reproj_loss + 0.1 * behind_camera_penalty
-        
-        return geometric_loss
-    
-    def _triangulate_points(self, P1, P2, pts1, pts2):
-        """
-        Triangulate 3D points from two camera views using DLT method.
-        """
-        batch_size = pts1.shape[1]
-        X_3d = torch.zeros(4, batch_size, device=pts1.device)
-        
-        for i in range(batch_size):
-            # Build the DLT matrix for this point
-            A = torch.zeros(4, 4, device=pts1.device)
-            
-            # First camera constraint
-            A[0, :] = pts1[0, i] * P1[2, :] - P1[0, :]
-            A[1, :] = pts1[1, i] * P1[2, :] - P1[1, :]
-            
-            # Second camera constraint
-            A[2, :] = pts2[0, i] * P2[2, :] - P2[0, :]
-            A[3, :] = pts2[1, i] * P2[2, :] - P2[1, :]
-            
-            # Solve using SVD
-            U, S, Vt = torch.svd(A)
-            X_3d[:, i] = Vt[-1, :]  # Last row of V^T is the solution
-        
-        return X_3d
-
     def _compute_ground_truth_relative_pose(self, pts1, pts2, K):
         """
         Compute ground truth relative pose from matched points using essential matrix.
@@ -589,77 +456,6 @@ class PairwiseConsistencyLoss(nn.Module):
         except Exception as e:
             # Return None if computation fails
             return None, None
-    
-    def precompute_relative_poses(self, data):
-        """
-        Pre-compute all relative poses for efficiency.
-        This can be called once before training to avoid repeated computation.
-        
-        Args:
-            data: SceneData object containing matches
-        """
-        if not hasattr(data, 'matches') or len(data.matches) == 0:
-            return
-        
-        K = getattr(data, 'K', None)
-        
-        if K is not None:
-            print("Pre-computing relative poses for all camera pairs...")
-        else:
-            print("Pre-computing fundamental matrices for all camera pairs (no intrinsics available)...")
-        
-        computed_count = 0
-        
-        for (i, j), matches_ij in data.matches.items():
-            if matches_ij['num_matches'] > 8:
-                try:
-                    # Check if already computed
-                    if ("R_gt" not in matches_ij or "t_gt" not in matches_ij) and "F_gt" not in matches_ij:
-                        pts1 = matches_ij['pts1']
-                        pts2 = matches_ij['pts2']
-                        
-                        result1, result2 = self._compute_ground_truth_relative_pose(pts1, pts2, K)
-                        
-                        if result1 is not None:
-                            if result2 is not None:
-                                # Store computed relative poses (essential matrix case)
-                                matches_ij["R_gt"] = torch.from_numpy(result1).float()
-                                matches_ij["t_gt"] = torch.from_numpy(result2.ravel()).float()
-                                computed_count += 1
-                            else:
-                                # Store computed fundamental matrix (no intrinsics case)
-                                matches_ij["F_gt"] = torch.from_numpy(result1).float()
-                                computed_count += 1
-                        else:
-                            print(f"Warning: Failed to compute relative pose for pair ({i}, {j})")
-                except Exception as e:
-                    print(f"Error computing relative pose for pair ({i}, {j}): {e}")
-        
-        print(f"Successfully computed {computed_count} relative poses")
-    
-    def clear_relative_poses(self, data):
-        """
-        Clear all stored relative poses from matches data.
-        Useful for freeing memory or forcing recomputation.
-        
-        Args:
-            data: SceneData object containing matches
-        """
-        if not hasattr(data, 'matches'):
-            return
-        
-        cleared_count = 0
-        for (i, j), matches_ij in data.matches.items():
-            if "R_gt" in matches_ij:
-                del matches_ij["R_gt"]
-                cleared_count += 1
-            if "t_gt" in matches_ij:
-                del matches_ij["t_gt"]
-                cleared_count += 1
-        
-        if cleared_count > 0:
-            print(f"Cleared {cleared_count} stored relative poses")
-
 
 class CombinedLoss_Pairwise(nn.Module):
     """
@@ -735,8 +531,7 @@ class CombinedLoss(nn.Module):
         pairwiseLoss = torch.tensor([0], device=pred_outliers.device)
 
         # Check if pairwise loss is effectively zero (no pairwise data available)
-        has_pairwise_data = (hasattr(data, 'relative_poses') and len(data.relative_poses) > 0) or \
-                           (hasattr(data, 'matches') and len(data.matches) > 0)
+        has_pairwise_data = (hasattr(data, 'matches') and len(data.matches) > 0)
         # If no pairwise data is available, set pairwise weight to 0
         # effective_pairwise_weight = self.pairwise_weight if has_pairwise_data else 0.0
         # Reprojection loss (geometric loss)
