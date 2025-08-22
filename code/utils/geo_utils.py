@@ -5,6 +5,7 @@ import cvxpy as cp
 from numpy.random._mt19937 import MT19937
 from numpy.random import Generator
 from utils import dataset_utils
+from kornia.geometry.conversions import rotation_matrix_to_quaternion
 import dask.array as da
 
 
@@ -173,6 +174,28 @@ def batch_get_cross_product_matrix(t):
 	T[:, 2, 0] = -t[:, 1]
 	T[:, 2, 1] = t[:, 0]
 	return T
+
+
+def batch_get_relative_pose(Rs, ts):
+    """
+    Computes the relative pose (translation and quaternion rotation) between all pairs of cameras.
+    """
+    n = len(Rs)
+    relative_poses = torch.zeros([n, n, 7], device=Rs.device)
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                relative_poses[i, j, 3] = 1.0 # identity quaternion for rotation (wxyz format)
+                continue
+            # Relative rotation from camera j to i
+            R_rel = torch.matmul(Rs[i].T, Rs[j])
+            # Relative translation from camera j to i, in camera i's coordinate system
+            t_rel = torch.matmul(Rs[i].T, (ts[j] - ts[i]).unsqueeze(-1)).squeeze(-1)
+            # Convert rotation matrix to quaternion
+            q_rel = rotation_matrix_to_quaternion(R_rel)
+            relative_poses[i, j, :3] = t_rel
+            relative_poses[i, j, 3:] = q_rel
+    return relative_poses
 
 
 def batch_get_bifocal_tensors(Rs, ts):

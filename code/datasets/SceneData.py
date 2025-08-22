@@ -7,9 +7,6 @@ import numpy as np
 import warnings
 
 
-
-
-
 class SceneData:
     def __init__(self, M, Ns, Ps_gt, scan_name, dilute_M=False, outliers=None, dict_info=None, nameslist=None, M_original=None):
 
@@ -30,6 +27,10 @@ class SceneData:
         self.M_original = M_original
         self.Ns = Ns
         self.outlier_indices = outliers
+
+        # Calculate and store pairwise relations
+        Rs_gt, ts_gt = geo_utils.decompose_camera_matrix(self.y.numpy(), self.Ns.numpy())
+        self.pairwise_relations = geo_utils.batch_get_relative_pose(torch.from_numpy(Rs_gt).float(), torch.from_numpy(ts_gt).float())
 
         # M to sparse matrix
         self.x = dataset_utils.M2sparse(M, normalize=True, Ns=Ns, M_original=M_original)
