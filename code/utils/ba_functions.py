@@ -2,11 +2,11 @@ import numpy as np
 import torch
 import time
 
-from ba_advanced import batch_matrix_to_pycolmap, prepare_ba_options, pycolmap_to_batch_matrix, create_ba_results, \
+from utils.ba_advanced import batch_matrix_to_pycolmap, prepare_ba_options, pycolmap_to_batch_matrix, create_ba_results, \
     process_camera_indices_and_bundle_adjustment
 from utils import  dataset_utils, ba_advanced, path_utils
 from utils import geo_utils
-from plot_utils import plot_cameras
+from utils.plot_utils import plot_cameras
 import pycolmap
 
 

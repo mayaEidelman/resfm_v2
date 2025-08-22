@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-import dataset_utils
+from utils import dataset_utils
 from models.baseNet import BaseNet
 from models.layers import *
 from utils.sparse_utils import SparseMat
@@ -91,7 +91,6 @@ class SetOfSetOutliersNet(BaseNet):
 
         if self.mode != 1:
             # outliers predictions
-
             outliers_out = self.outlier_net(x.values)
             outliers_out = torch.sigmoid(outliers_out)
         else:
