@@ -1,1 +1,4 @@
-datasets/*
+/datasets
+/results
+**/__pycache__/*
+wget-log
