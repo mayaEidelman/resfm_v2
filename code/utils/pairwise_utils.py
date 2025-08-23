@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from utils import geo_utils, dataset_utils
 import cv2
+from torch.nn import functional as F
 
 
 def extract_pairwise_matches_from_scene(data, min_matches=8):
@@ -415,3 +416,81 @@ def compute_epipolar_constraint_error(F, pts1, pts2):
     dist2 = torch.abs(torch.sum(pts2 * lines2, dim=0)) / torch.norm(lines2[:2, :], dim=0)
     # Symmetric epipolar distance
     return torch.median(dist1 + dist2) # I changed here to median instead of meanto make it more robust to outliers but dont know it its ok :/
+
+def relative_pose_matrix_loss(relative_poses_pred, relative_poses_gt, rotation_weight=0.5, translation_weight=0.5, eps=1e-7):
+    """
+    Compute loss between two relative-pose matrices produced by `geo_utils.batch_get_relative_pose`.
+
+    Args:
+        relative_poses_pred: Tensor [n, n, 7] with [tx, ty, tz, w, x, y, z]
+        relative_poses_gt:   Tensor [n, n, 7] with same layout
+        rotation_weight:     Scalar weight for rotation loss
+        translation_weight:  Scalar weight for translation-direction loss
+        eps:                 Small constant for numerical stability
+
+    Returns:
+        total_loss, rot_loss_mean, trans_loss_mean (all scalars)
+    """
+    assert relative_poses_pred.shape == relative_poses_gt.shape, "Pred/GT shapes must match"
+    assert relative_poses_pred.shape[-1] == 7, "Relative pose tensors must have 7 channels (t[3] + q[4])"
+
+    n = relative_poses_pred.shape[0]
+    device = relative_poses_pred.device
+
+    # Exclude i == j pairs (identity)
+    offdiag_mask = ~torch.eye(n, dtype=torch.bool, device=device)
+
+    t_pred = relative_poses_pred[..., :3]
+    q_pred = relative_poses_pred[..., 3:]
+    t_gt   = relative_poses_gt[..., :3]
+    q_gt   = relative_poses_gt[..., 3:]
+
+    # Normalize quaternions and compute geodesic distance: 2*acos(|<q1, q2>|)
+    q_pred = F.normalize(q_pred, p=2, dim=-1)
+    q_gt   = F.normalize(q_gt,   p=2, dim=-1)
+    cos_q  = torch.sum(q_pred * q_gt, dim=-1).abs().clamp(min=-1.0 + eps, max=1.0 - eps)
+    rot_loss = 2.0 * torch.acos(cos_q)
+
+    # Translation direction alignment: 1 - |cos(theta)| between directions
+    t_pred_n = F.normalize(t_pred, p=2, dim=-1)
+    t_gt_n   = F.normalize(t_gt,   p=2, dim=-1)
+    trans_loss = 1.0 - torch.sum(t_pred_n * t_gt_n, dim=-1).abs()
+
+    # Apply off-diagonal mask and average
+    rot_loss = rot_loss[offdiag_mask].mean()
+    trans_loss = trans_loss[offdiag_mask].mean()
+
+    return rot_loss, trans_loss
+
+    
+def compute_pairwise_pose_consistency(pred_cam, data, device=None, rotation_weight=1.0, translation_weight=1.0):
+    """
+    Compute pairwise pose consistency between predicted and ground-truth relative poses.
+
+    Returns:
+        rotation_loss, translation_loss (scalars)
+    """
+    Ps_norm = pred_cam["Ps_norm"]  # [m, 3, 4]
+    device = Ps_norm.device if device is None else device
+
+    # Predicted absolute poses -> relative poses (torch branch)
+    Rs_pred, ts_pred = geo_utils.decompose_camera_matrix(Ps_norm)
+    relative_poses_pred = geo_utils.batch_get_relative_pose(Rs_pred, ts_pred)
+
+    # Ground-truth absolute poses -> relative poses
+    Ks_invT = getattr(data, 'Ns_invT', None)
+    Ks = Ks_invT.transpose(1, 2) if Ks_invT is not None else None
+    Rs_gt, ts_gt = geo_utils.decompose_camera_matrix(data.y.to(device), Ks.to(device) if Ks is not None else None)
+    relative_poses_gt = geo_utils.batch_get_relative_pose(Rs_gt, ts_gt)
+
+    # Ensure same device/dtype
+    relative_poses_pred = relative_poses_pred.to(device)
+    relative_poses_gt = relative_poses_gt.to(device)
+
+    rot_loss, trans_loss = relative_pose_matrix_loss(
+        relative_poses_pred, relative_poses_gt,
+        rotation_weight=rotation_weight,
+        translation_weight=translation_weight
+    )
+
+    return rot_loss, trans_loss

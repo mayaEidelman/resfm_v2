@@ -124,9 +124,20 @@ class PairwiseConsistencyLoss(nn.Module):
         self.rotation_weight = conf.get_float("loss.rotation_weight", default=1.0)
         self.translation_weight = conf.get_float("loss.translation_weight", default=1.0)
         self.absolute_pose_weight = conf.get_float("loss.absolute_pose_weight", default=1.0)
+        self.pairwise_pose_weight = conf.get_float("loss.pairwise_pose_weight", default=1.0)
         self.calibrated = conf.get_bool('dataset.calibrated')
-        
+
     def forward(self, pred_cam, data, epoch=None):
+        Ps_pred = pred_cam["Ps_norm"]
+
+        absolute_pose_loss = self.absolut_Rt_loss(pred_cam, data, Ps_pred.device)
+        pairwise_pose_loss = self.pairwise_Rt_loss(pred_cam, data, Ps_pred.device)
+
+        total_loss = (absolute_pose_loss + pairwise_pose_loss)/2
+        print(f"Pairwise Loss: {total_loss:.6f}, Absolute Pose: {absolute_pose_loss:.6f}, Pairwise Consistency: {pairwise_pose_loss:.6f}")
+        return total_loss
+        
+    def forward2(self, pred_cam, data, epoch=None):
         """
         Compute unsupervised pairwise consistency loss using relative pose consistency.
         
@@ -261,12 +272,25 @@ class PairwiseConsistencyLoss(nn.Module):
         
         return total_loss
 
+    def pairwise_Rt_loss(self, pred_cam, data, device=None):
+        pairwise_pose_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        if self.pairwise_pose_weight > 0.0:
+            try:
+                rotation_loss, translation_loss = pairwise_utils.compute_pairwise_pose_consistency(pred_cam, data, device)
+                pairwise_pose_loss = (rotation_loss + translation_loss)/2
+            except Exception as e:
+                print(f"Warning: Failed to compute pairwise pose consistency loss: {e}")
+                pairwise_pose_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        
+        return pairwise_pose_loss
+        
+
     def absolut_Rt_loss(self, pred_cam, data, device):
         absolute_pose_loss = torch.tensor(0.0, device=device, requires_grad=True)
         if self.absolute_pose_weight > 0.0:
             try:
                 rotation_loss, translation_loss = pairwise_utils.compute_absolute_pose_consistency(pred_cam, data, self.calibrated, device)
-                absolute_pose_loss = rotation_loss + translation_loss
+                absolute_pose_loss = (rotation_loss + translation_loss)/2
             except Exception as e:
                 print(f"Warning: Failed to compute absolute pose consistency loss: {e}")
                 absolute_pose_loss = torch.tensor(0.0, device=device, requires_grad=True)
@@ -552,66 +576,6 @@ class CombinedLoss(nn.Module):
         print(loss)
 
         return loss
-
-
-class AbsolutePoseConsistencyLoss(nn.Module):
-    """
-    Absolute pose consistency loss that uses the same computation as evaluation.py.
-    This aligns predicted poses with ground truth and computes rotation/translation errors.
-    """
-    def __init__(self, conf):
-        super().__init__()
-        self.calibrated = conf.get_bool('dataset.calibrated')
-        self.rotation_weight = conf.get_float("loss.rotation_weight", default=1.0)
-        self.translation_weight = conf.get_float("loss.translation_weight", default=1.0)
-        
-    def forward(self, pred_cam, data, epoch=None):
-        """
-        Compute absolute pose consistency loss using the same method as evaluation.py.
-        """
-        if not self.calibrated:
-            return torch.tensor(0.0, device=pred_cam["Ps_norm"].device, requires_grad=True)
-        
-        device = pred_cam["Ps_norm"].device
-        
-        # Extract predicted poses using the same method as evaluation.py
-        Ps_norm = pred_cam["Ps_norm"]  # [m, 3, 4]
-        
-        # Convert to numpy for geo_utils functions (they expect numpy)
-        Ps_norm_np = Ps_norm.detach().cpu().numpy()
-        
-        # Decompose camera matrices to get rotations and translations
-        Rs_pred_np, ts_pred_np = geo_utils.decompose_camera_matrix(Ps_norm_np)
-        
-        # Get ground truth poses
-        Ns_inv = data.Ns_invT.transpose(1, 2).cpu().numpy()
-        Rs_gt_np, ts_gt_np = geo_utils.decompose_camera_matrix(data.y.cpu().numpy(), Ns_inv)
-        
-        # Align predicted poses with ground truth using the same alignment as evaluation.py
-        Rs_fixed_np, ts_fixed_np, _ = geo_utils.align_cameras(
-            Rs_pred_np, Rs_gt_np, ts_pred_np, ts_gt_np, return_alignment=True
-        )
-        
-        # Compute rotation and translation errors
-        Rs_error_np, ts_error_np = geo_utils.tranlsation_rotation_errors(
-            Rs_fixed_np, ts_fixed_np, Rs_gt_np, ts_gt_np
-        )
-        
-        # Convert back to tensors
-        Rs_error = torch.from_numpy(Rs_error_np).float().to(device)
-        ts_error = torch.from_numpy(ts_error_np).float().to(device)
-        
-        # Compute weighted mean errors
-        rotation_loss = self.rotation_weight * Rs_error.mean()
-        translation_loss = self.translation_weight * ts_error.mean()
-        
-        total_loss = rotation_loss + translation_loss
-        
-        if epoch is not None and epoch % 1000 == 0:
-            print(f"Absolute Pose Loss: {total_loss:.6f}, Rotation: {rotation_loss:.6f}, Translation: {translation_loss:.6f}")
-        
-        return total_loss
-
 
 class GTLoss(nn.Module):
     def __init__(self, conf):
