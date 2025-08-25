@@ -45,10 +45,19 @@ def classificationMetrics(pred, gt):
     recall_inliers = tn / (tn + fp + epsilon)             # Specificity
     outliers_after = fn / (tn + fn + epsilon)             # Outliers remaining after filtering
 
-    # Score averages
-    outliers_avg = pred[gt == 1].mean().item()            # Mean score for real outliers
-    inliers_avg = pred[gt == 0].mean().item()             # Mean score for real inliers
-    f_inliers_avg = pred[(pred_labels == 0) & (gt == 1)].mean().item()  # False inliers avg score
+    # Score averages with empty-mask guards (avoid NaNs)
+    out_mask = (gt == 1)
+    in_mask = (gt == 0)
+    false_inlier_mask = (pred_labels == 0) & (gt == 1)
+
+    outliers_avg = pred[out_mask].mean().item() if out_mask.any() else 0.0
+    inliers_avg = pred[in_mask].mean().item() if in_mask.any() else 0.0
+    f_inliers_avg = pred[false_inlier_mask].mean().item() if false_inlier_mask.any() else 0.0
+
+        # Score averages
+    # outliers_avg = pred[gt == 1].mean().item()            # Mean score for real outliers
+    # inliers_avg = pred[gt == 0].mean().item()             # Mean score for real inliers
+    # f_inliers_avg = pred[(pred_labels == 0) & (gt == 1)].mean().item()  # False inliers avg score
 
     return {
         'Accuracy': accuracy,
@@ -85,28 +94,41 @@ def OutliersMetrics(pred_outliers, data):
     return metrics
 
 def CalcMeanBatchMetrics(train_metrics, phase=None):
-    # gets list of dicts of the metrics
-    # returns the dict of the means
+    # Accepts either a list[dict], or list[list[dict]] (e.g., gathered across ranks)
+    # Returns a dict of mean metrics
     dict_mean_metrics = {}
-    metrics = train_metrics[0].keys()
-    for metric in metrics:
-        # calculate the mean of each metric across all batches
+
+    # Flatten one level if needed
+    if isinstance(train_metrics, list) and len(train_metrics) > 0 and isinstance(train_metrics[0], list):
+        flat_metrics = [d for sub in train_metrics for d in sub]
+    else:
+        flat_metrics = train_metrics
+
+    if not flat_metrics:
+        return dict_mean_metrics
+
+    # Determine metrics keys from the first dict
+    metrics_keys = list(flat_metrics[0].keys())
+
+    for metric in metrics_keys:
         try:
-            if phase is None:
-                metric_mean = torch.mean(torch.tensor([e[metric] for e in train_metrics])).item()
-                dict_mean_metrics[metric] = metric_mean
-            else:
-                if type(train_metrics[0][metric]) == type(1.0):
-                    metric_mean = torch.mean(torch.tensor([e[metric] for e in train_metrics])).item()
-                else:
-                    metric_mean = torch.mean(torch.tensor([element for e in train_metrics for element in e[metric]])).item()
+            values = []
+            for entry in flat_metrics:
+                v = entry[metric]
+                # Normalize to Python float
+                if isinstance(v, torch.Tensor):
+                    if v.numel() == 1:
+                        v = v.item()
+                    else:
+                        # If somehow an array sneaks in, take its mean
+                        v = v.float().mean().item()
+                values.append(float(v))
 
-                dict_mean_metrics[phase.name + " - " + metric] = metric_mean
+            mean_val = float(torch.tensor(values).mean().item())
+            key = metric if phase is None else (phase.name + " - " + metric)
+            dict_mean_metrics[key] = mean_val
         except Exception as error:
-            # handle the exception
             print("An exception occurred:", error)
-            print(train_metrics)
-
-
+            print(flat_metrics)
 
     return dict_mean_metrics

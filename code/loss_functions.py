@@ -5,6 +5,7 @@ from torch import nn
 from torch.nn import functional as F
 import cv2
 import numpy as np
+import traceback
 
 class ESFMLoss(nn.Module):
     def __init__(self, conf):
@@ -82,7 +83,7 @@ class ESFMLoss_weighted(nn.Module):
         reproj_err = reproj_err[data.valid_pts]
         hinge_loss = hinge_loss[data.valid_pts]
 
-        pred_outliers = pred_outliers.squeeze(dim=-1)
+        pred_outliers = torch.nan_to_num(pred_outliers.squeeze(dim=-1), nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
         reproj_err = (1 - pred_outliers) * reproj_err # Outlier-weighted loss
         weightedLoss = torch.where(projected_points, reproj_err, hinge_loss)
 
@@ -95,10 +96,22 @@ class GT_Loss_Outliers(nn.Module):
     def forward(self, pred_outliers, data, epoch=None):
         gt_outliers = data.outlier_indices[data.x.indices.T[:, 0], data.x.indices.T[:, 1]]
 
-        # Compute class-balanced BCE loss
-        outliers_ratio = gt_outliers.sum() / gt_outliers.shape[0]
-        weights = (gt_outliers.float() * ((1.0 / outliers_ratio) * 1 - 2)) + 1 #class balancing
-        bce_loss = F.binary_cross_entropy(pred_outliers.squeeze(), gt_outliers.float(), weight=weights)
+        # # Align devices and types
+        device = pred_outliers.device
+        gt = torch.nan_to_num(gt_outliers.float().to(device), nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+        pred = torch.nan_to_num(pred_outliers.squeeze().to(device), nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+
+        # Compute class-balanced BCE loss with epsilon guard
+        pos_ratio = gt.mean().clamp_min(1e-6)
+        weights = (gt * ((1.0 / pos_ratio) - 2.0)) + 1.0
+
+        bce_loss = F.binary_cross_entropy(pred, gt, weight=weights)
+
+                # Compute class-balanced BCE loss
+        # outliers_ratio = gt_outliers.sum() / gt_outliers.shape[0]
+        # weights = (gt_outliers.float() * ((1.0 / outliers_ratio) * 1 - 2)) + 1 #class balancing
+        # bce_loss = F.binary_cross_entropy(pred_outliers.squeeze(), gt_outliers.float(), weight=weights)
+
 
         return bce_loss
 
@@ -134,7 +147,10 @@ class PairwiseConsistencyLoss(nn.Module):
         pairwise_pose_loss = self.pairwise_Rt_loss(pred_cam, data, Ps_pred.device)
 
         total_loss = (absolute_pose_loss + pairwise_pose_loss)/2
-        print(f"Pairwise Loss: {total_loss:.6f}, Absolute Pose: {absolute_pose_loss:.6f}, Pairwise Consistency: {pairwise_pose_loss:.6f}")
+        try:
+            print(f"Pairwise Loss: {total_loss.item():.6f}, Absolute Pose: {absolute_pose_loss.item():.6f}, Pairwise Consistency: {pairwise_pose_loss.item():.6f}")
+        except Exception:
+            pass
         return total_loss
         
     def forward2(self, pred_cam, data, epoch=None):
@@ -280,7 +296,7 @@ class PairwiseConsistencyLoss(nn.Module):
                 pairwise_pose_loss = (rotation_loss + translation_loss)/2
             except Exception as e:
                 print(f"Warning: Failed to compute pairwise pose consistency loss: {e}")
-                pairwise_pose_loss = torch.tensor(0.0, device=device, requires_grad=True)
+                traceback.print_exc()
         
         return pairwise_pose_loss
         
@@ -293,7 +309,7 @@ class PairwiseConsistencyLoss(nn.Module):
                 absolute_pose_loss = (rotation_loss + translation_loss)/2
             except Exception as e:
                 print(f"Warning: Failed to compute absolute pose consistency loss: {e}")
-                absolute_pose_loss = torch.tensor(0.0, device=device, requires_grad=True)
+                traceback.print_exc()
         
         return absolute_pose_loss
     
@@ -569,11 +585,10 @@ class CombinedLoss(nn.Module):
         # Pairwise loss
         if self.pairwise_weight:
             pairwiseLoss = self.pairwise_loss(pred_cam, data, epoch)
-            print("Pairwise Loss:", pairwiseLoss)
+            # print("Pairwise Loss:", pairwiseLoss)
 
 
-        loss = self.alpha * ESFMLoss + self.beta * classificationLoss + self.pairwise_weight * pairwiseLoss
-        print(loss)
+        loss = self.alpha * ESFMLoss + self.beta * classificationLoss + 0.1 * pairwiseLoss
 
         return loss
 
