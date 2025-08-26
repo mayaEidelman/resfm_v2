@@ -76,7 +76,7 @@ def epoch_evaluation(data_loader, model, conf, epoch, phase, save_predictions=Fa
                     metrics.update(stats)
 
 
-                metrics['Scene'] = curr_data.scan_name
+                metrics['Scene'] = curr_data.scene_name
                 metrics_list.append(metrics)
 
                 if save_predictions:
@@ -84,7 +84,7 @@ def epoch_evaluation(data_loader, model, conf, epoch, phase, save_predictions=Fa
                         dataset_utils.save_outliers(outliersOutputs, conf, curr_epoch=epoch, phase=phase)
                     if errors is not None:
                         errors.update(errors_per_cam)
-                        plot_utils.plot_cameras_before_and_after_ba(outputs, errors, conf, phase, scan=curr_data.scan_name, epoch=epoch, bundle_adjustment=bundle_adjustment)
+                        plot_utils.plot_cameras_before_and_after_ba(outputs, errors, conf, phase, scan=curr_data.scene_name, epoch=epoch, bundle_adjustment=bundle_adjustment)
 
     df_metrics = evaluation.organize_errors(metrics_list)
     model.train()
@@ -102,7 +102,7 @@ def epoch_train(conf, train_data, model, loss_func, optimizer, scheduler, epoch,
 
         for i, curr_data in enumerate(train_batch):
             if not dataset_utils.is_valid_sample(curr_data, phase=phase, min_pts_per_cam=0):
-                print(f"{fabric.global_rank}: {epoch} {curr_data.scan_name} has a camera with not enough points")
+                print(f"{fabric.global_rank}: {epoch} {curr_data.scene_name} has a camera with not enough points")
                 continue
 
             pred_cam, pred_outliers = model(curr_data)

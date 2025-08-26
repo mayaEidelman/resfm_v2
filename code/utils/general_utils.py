@@ -231,3 +231,18 @@ def init_exp(default_phase):
         conf['train']['lr'] = optimization_lr
 
     return conf, device, phase
+
+def nonzero_safe(A):
+        """
+        Given a pytorch tensor / numpy array A (typically a boolean mask), return a tuple of indices for each of the dimensions, pointing to the non-zero elements of the input tensor / array.
+        That is, the functionality is the same as np.nonzero(A) or torch.nonzero(A, as_tuple=True).
+        The only difference is that if A is a torch CPU tensor, the torch.nonzero() function is avoided, as the CPU-implementation appears to contain bugs related to memory management.
+        """
+        if isinstance(A, np.ndarray):
+            return np.nonzero(A)
+        else:
+            if A.is_cuda:
+                return torch.nonzero(A, as_tuple=True)
+            else:
+                return tuple(torch.from_numpy(x) for x in np.nonzero(A.detach().numpy()))
+

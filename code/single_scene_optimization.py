@@ -17,7 +17,7 @@ def train_single_model(conf, device, phase):
         print("models." + conf.get_string("model.type"))
         model = general_utils.get_class("models." + conf.get_string("model.type"))(conf, Phases.TEST).to(device)
         print(model)
-        scene_data = SceneData.create_scene_data(conf, Phases.TEST)
+        scene_data = SceneData.create_scene_data(conf, phase=Phases.TEST)
         scene_dataset = ScenesDataSet.ScenesDataSet([scene_data], return_all=True)
         scene_loader = torch.utils.data.DataLoader(scene_dataset, collate_fn=ScenesDataSet.collate_fn)
         _, _, test_errors = train.test(conf, model, Phases.TEST, train_data=None, validation_data=None, test_data=scene_loader, fabri=fabric, run_ba=False)
@@ -26,7 +26,7 @@ def train_single_model(conf, device, phase):
         general_utils.write_results(conf, test_errors, file_name="myTest_fineTuning", phase=phase, append=True)
 
     # Create data
-    scene_data = SceneData.create_scene_data(conf, phase)
+    scene_data = SceneData.create_scene_data(conf, phase=phase)
 
     # Create model
     print("models." + conf.get_string("model.type"))
