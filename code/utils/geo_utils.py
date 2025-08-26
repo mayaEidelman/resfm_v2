@@ -181,8 +181,6 @@ def batch_get_relative_pose(rotations, translations):
 	Computes the relative pose (translation and flattened rotation matrix) 
 	between all pairs of cameras in an efficient, vectorized manner.
 	"""
-	camera_count = len(rotations)
-
 	reltative_rotations = torch.matmul(rotations.transpose(1, 2).unsqueeze(1), rotations.unsqueeze(0))
 	relative_quaternions = rotation_matrix_to_quaternion(reltative_rotations)
 	
