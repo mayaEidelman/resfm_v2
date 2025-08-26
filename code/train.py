@@ -131,6 +131,7 @@ def epoch_train(conf, train_data, model, loss_func, optimizer, scheduler, epoch,
             optimizer.step()
 
         else:
+            print('Hi')
             print("Negative or zero batch loss:", batch_loss.item())
             metrics = nanMetrics()
             train_metrics = [metrics]
