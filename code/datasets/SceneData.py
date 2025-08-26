@@ -29,8 +29,8 @@ class SceneData:
         self.outlier_indices = outliers
 
         # Calculate and store pairwise relations
-        Rs_gt, ts_gt = geo_utils.decompose_camera_matrix(self.y.numpy(), self.Ns.numpy())
-        self.pairwise_relations = geo_utils.batch_get_relative_pose(torch.from_numpy(Rs_gt).float(), torch.from_numpy(ts_gt).float())
+        Rs_gt, ts_gt = geo_utils.decompose_camera_matrix(self.y, torch.linalg.inv(self.Ns))
+        self.pairwise_relations = geo_utils.batch_get_relative_pose(Rs_gt, ts_gt)
 
         # M to sparse matrix
         self.x = dataset_utils.M2sparse(M, normalize=True, Ns=Ns, M_original=M_original)

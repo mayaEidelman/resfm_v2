@@ -38,12 +38,12 @@ def tranlsation_rotation_errors(R_fixed, t_fixed, gt_Rs, gt_ts):
 def align_cameras(pred_Rs, gt_Rs, pred_ts, gt_ts, return_alignment=False):
 	'''
 
-    :param pred_Rs: torch double - n x 3 x 3 predicted camera rotation
-    :param gt_Rs: torch double - n x 3 x 3 camera ground truth rotation
-    :param pred_ts: torch double - n x 3 predicted translation
-    :param gt_ts: torch double - n x 3 ground truth translation
-    :return:
-    '''
+	:param pred_Rs: torch double - n x 3 x 3 predicted camera rotation
+	:param gt_Rs: torch double - n x 3 x 3 camera ground truth rotation
+	:param pred_ts: torch double - n x 3 predicted translation
+	:param gt_ts: torch double - n x 3 ground truth translation
+	:return:
+	'''
 	# find rotation
 	d = 3
 	n = pred_Rs.shape[0]
@@ -80,11 +80,11 @@ def align_cameras(pred_Rs, gt_Rs, pred_ts, gt_ts, return_alignment=False):
 def decompose_camera_matrix(Ps, Ks=None):
 	"""Decomposes a camera matrix into its rotation and translation components.
   Args:
-    Ps: A batch of camera matrices.
-    Ks: A batch of intrinsic camera matrices. If None, the identity matrix is used.
+	Ps: A batch of camera matrices.
+	Ks: A batch of intrinsic camera matrices. If None, the identity matrix is used.
   Returns:
-    Rs: A batch of rotation matrices.
-    ts: A batch of translation vectors.
+	Rs: A batch of rotation matrices.
+	ts: A batch of translation vectors.
   """
 	if isinstance(Ps, np.ndarray):
 		Rt = np.linalg.inv(Ks) @ Ps if Ks is not None else Ps
@@ -125,10 +125,10 @@ def decompose_essential_matrix(E, x1, x2):
 
 def M_to_xs(M):
 	"""
-    reshapes the 2d points
-    :param M: [2*m, n]
-    :return: xs [m,n,2]
-    """
+	reshapes the 2d points
+	:param M: [2*m, n]
+	:return: xs [m,n,2]
+	"""
 	m, n = M.shape
 	m = m // 2
 	xs = M.reshape([m, 2, n])
@@ -176,26 +176,22 @@ def batch_get_cross_product_matrix(t):
 	return T
 
 
-def batch_get_relative_pose(Rs, ts):
-    """
-    Computes the relative pose (translation and quaternion rotation) between all pairs of cameras.
-    """
-    n = len(Rs)
-    relative_poses = torch.zeros([n, n, 7], device=Rs.device)
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                relative_poses[i, j, 3] = 1.0 # identity quaternion for rotation (wxyz format)
-                continue
-            # Relative rotation from camera j to i
-            R_rel = torch.matmul(Rs[i].T, Rs[j])
-            # Relative translation from camera j to i, in camera i's coordinate system
-            t_rel = torch.matmul(Rs[i].T, (ts[j] - ts[i]).unsqueeze(-1)).squeeze(-1)
-            # Convert rotation matrix to quaternion
-            q_rel = rotation_matrix_to_quaternion(R_rel)
-            relative_poses[i, j, :3] = t_rel
-            relative_poses[i, j, 3:] = q_rel
-    return relative_poses
+def batch_get_relative_pose(rotations, translations):
+	"""
+	Computes the relative pose (translation and flattened rotation matrix) 
+	between all pairs of cameras in an efficient, vectorized manner.
+	"""
+	camera_count = len(rotations)
+
+	reltative_rotations = torch.matmul(rotations.transpose(1, 2).unsqueeze(1), rotations.unsqueeze(0))
+	relative_quaternions = rotation_matrix_to_quaternion(reltative_rotations)
+	
+	translation_deltas = translations.unsqueeze(0) - translations.unsqueeze(1)
+	relative_translations = torch.matmul(rotations.transpose(1, 2).unsqueeze(1), translation_deltas.unsqueeze(-1)).squeeze(-1)
+
+	relative_poses = torch.cat([relative_translations, relative_quaternions], dim=2)
+
+	return relative_poses
 
 
 def batch_get_bifocal_tensors(Rs, ts):
@@ -230,12 +226,12 @@ def batch_get_fundamental_from_V_t(Vi, Vj, ti, tj):
 
 def get_camera_matrix(R, t, K):
 	"""
-    Get the camera matrix as described in paper
-    :param R: Orientation Matrix
-    :param t: Camera Position   
-    :param K: Intrinsic parameters
-    :return: Camera matrix
-    """
+	Get the camera matrix as described in paper
+	:param R: Orientation Matrix
+	:param t: Camera Position   
+	:param K: Intrinsic parameters
+	:return: Camera matrix
+	"""
 	if isinstance(R, np.ndarray):
 		return K @ R.T @ np.concatenate((np.eye(3), -t.reshape(3, 1)), axis=1)
 	else:
@@ -255,11 +251,11 @@ def batch_get_camera_matrix_from_rtk(Rs, ts, Ks):
 
 def get_camera_matrix_from_Vt(V, t):
 	"""
-    Get the camera matrix as described in paper
-    :param V: inv(K).T @ R.T Orientation Matrix
-    :param t: Camera Position
-    :return: Camera matrix
-    """
+	Get the camera matrix as described in paper
+	:param V: inv(K).T @ R.T Orientation Matrix
+	:param t: Camera Position
+	:return: Camera matrix
+	"""
 	return torch.inverse(V).T @ torch.cat((torch.eye(3), -t), dim=1)
 
 
@@ -278,8 +274,8 @@ def batch_pflat(x):
 
 def correct_matches(P1, P2, pts_img1, pts_img2):
 	"""
-    This function corrects the matches between two images using global triangulation.
-    """
+	This function corrects the matches between two images using global triangulation.
+	"""
 
 	pts3D = cv2.triangulatePoints(P1, P2, pts_img1[0:2, :], pts_img2[0:2, :])
 	pts_img1 = torch.from_numpy(pflat(P1 @ pts3D)).float()
@@ -289,8 +285,8 @@ def correct_matches(P1, P2, pts_img1, pts_img2):
 
 def calc_reprojection_error(P1, P2, pts_img1, pts_img2):
 	"""
-        This function calculates the reprojection error between two images.
-        """
+		This function calculates the reprojection error between two images.
+		"""
 
 	coorected_pts_img1, coorected_pts_img2 = correct_matches(P1.numpy(), P2.numpy(), pts_img1.numpy(), pts_img2.numpy())
 	reproj_err1 = torch.norm(pflat(coorected_pts_img1)[0:2, :] - pflat(pts_img1)[0:2, :], dim=0, p=2)
@@ -322,11 +318,11 @@ def calc_global_reprojection_error_withPoints(Ps, M, Ns, X):
 
 def reprojection_error_with_points(Ps, Xs, xs, visible_points=None):
 	"""
-    :param Ps: [m,3,4]
-    :param Xs: [n,3] or [n,4]
-    :param xs: [m,n,2]
-    :return: errors [m,n]
-    """
+	:param Ps: [m,3,4]
+	:param Xs: [n,3] or [n,4]
+	:param xs: [m,n,2]
+	:return: errors [m,n]
+	"""
 	m, n, d = xs.shape
 	_, D = Xs.shape
 	X4 = np.concatenate([Xs, np.ones([n, 1])], axis=1) if D == 3 else Xs
@@ -355,16 +351,16 @@ def get_points_in_view(M, img_idx, X=None):
 
 def normalize_points_cams(Ps, xs, Ns):
 	"""
-    Normalize the points and the cameras using the matrices in N.
-    if :
-    xs[i,j] ~ P[i] @ X[j]
-    than so is:
-     N[i] @ xs[i,j] ~ N[i] @ P[i] @ X[j]
-    :param Ps:  [m,3,4]
-    :param xs:  [m,n,2] or [m,n,3]
-    :param Ns:  [m,3,3]
-    :return:  norm_P, norm_x
-    """
+	Normalize the points and the cameras using the matrices in N.
+	if :
+	xs[i,j] ~ P[i] @ X[j]
+	than so is:
+	 N[i] @ xs[i,j] ~ N[i] @ P[i] @ X[j]
+	:param Ps:  [m,3,4]
+	:param xs:  [m,n,2] or [m,n,3]
+	:param Ns:  [m,3,3]
+	:return:  norm_P, norm_x
+	"""
 	m, n, d = xs.shape
 	xs_3 = np.concatenate([xs, np.ones([m, n, 1])], axis=2) if d == 2 else xs
 	norm_P = np.zeros_like(Ps)
@@ -381,12 +377,12 @@ def normalize_points_cams(Ps, xs, Ns):
 
 def dlt_triangulation(Ps, xs, visible_points):
 	"""
-    Use  linear triangulation to find the points X[j] such that  xs[i,j] ~ P[i] @ X[j]
-    :param Ps:  [m,3,4]
-    :param xs: [m,n,2] or [m,n,3]
-    :param visible_points: [m,n] a boolean matrix of which cameras see which points
-    :return: Xs [n,4] normalized such the X[j,-1] == 1
-    """
+	Use  linear triangulation to find the points X[j] such that  xs[i,j] ~ P[i] @ X[j]
+	:param Ps:  [m,3,4]
+	:param xs: [m,n,2] or [m,n,3]
+	:param visible_points: [m,n] a boolean matrix of which cameras see which points
+	:return: Xs [n,4] normalized such the X[j,-1] == 1
+	"""
 	m, n, _ = xs.shape
 	X = np.zeros([n, 4])
 	for i in range(n):
@@ -432,9 +428,9 @@ def n_view_triangulation(Ps, M, Ns=None):
 def xs_valid_points(xs):
 	"""
 
-    :param xs: [m,n,2]
-    :return: A boolean matrix of the visible 2d points
-    """
+	:param xs: [m,n,2]
+	:return: A boolean matrix of the visible 2d points
+	"""
 	if isinstance(xs, np.ndarray):
 		return np.logical_or(xs[:, :, 0] > 0, xs[:, :, 1] > 0)
 	else:
@@ -498,10 +494,10 @@ def dilutePoint(M):
 
 
 def remove_empty_tracks_cams(M, Ps=None, Ns=None, outliers=None, Xs=None, data=None, pts_per_cam_thresh=1,
-                             cam_per_pts_thresh=2):
+							 cam_per_pts_thresh=2):
 	"""
-    Remove columns/rows that don't pass thresholds by points count
-    """
+	Remove columns/rows that don't pass thresholds by points count
+	"""
 
 	valid_pts = dataset_utils.get_M_valid_points(M)
 	cam_per_pts = valid_pts.sum(axis=0)  # [n_pts]
