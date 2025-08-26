@@ -11,8 +11,8 @@ import copy
 
 from lightning.fabric import Fabric
 
-# fabric = Fabric(accelerator="cuda", devices="auto", strategy="ddp")
-fabric = Fabric(accelerator="cuda", devices=1)
+fabric = Fabric(accelerator="cuda", devices="auto", strategy="ddp")
+# fabric = Fabric(accelerator="cuda", devices=1)
 fabric.launch()
 
 def main():
