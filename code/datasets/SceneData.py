@@ -60,6 +60,7 @@ class SceneData:
 
         # Triangulate scenepoints and store a target depths for prediction (at a normalized scale)
         if self.store_depth_targets:
+            print("Storing depth targets...")
             valid_pts_idx = nonzero_safe(self.valid_pts)
             if depths is not None:
                 # Precomputed depths already provided
@@ -294,7 +295,6 @@ def create_scene_data(
     store_depth_targets = conf.get_bool('model.depth_head.enabled', default=False)
 
     # Optionally override some configuration options:
-    print(scene, "!!!!!!!!!!!!!!!!")
     scene = scene if scene is not None else conf.get_string('dataset.scene')
     calibrated = calibrated if calibrated is not None else conf.get_bool('dataset.calibrated')
     use_gt = use_gt if use_gt is not None else conf.get_bool('dataset.use_gt')
@@ -350,23 +350,24 @@ def sample_data(data, num_samples, adjacent=True):
     M = data.M[M_indices]
     outlier_indices = data.outlier_indices[indices]
     outlier_indices = outlier_indices[:, (M > 0).sum(dim=0) > 2]
+    M = M[:, (M > 0).sum(dim=0) > 2]
     if data.store_depth_targets:
         depths = depths[indices, :]
 
     # Additional point filtering, discarding points that are not visible in at least MIN_N_VIEWS_PER_POINT views:
-    M_valid_pts_mask = dataset_utils.get_M_valid_points(M)
-    points_mask = M_valid_pts_mask.any(dim=0) # M_valid_pts_mask is False for the entire column of such points, so we just need to check for which columns of the mask there are True entries.
-    if M.is_cuda:
-        M = M[:, points_mask]
-        if data.store_depth_targets:
-            depths = depths[:, points_mask]
-    else:
-        # NOTE: Workaround for bug in nonzero_out_cpu(), internally called by pytorch during advanced indexing operation.
-        idx = np.nonzero(points_mask.numpy())[0]
-        assert len(idx.shape) == 1, 'Expected 1D-array, but encountered idx.shape == {}'.format(idx.shape)
-        M = M[:, torch.from_numpy(idx)]
-        if data.store_depth_targets:
-            depths = depths[:, torch.from_numpy(idx)]
+    # M_valid_pts_mask = dataset_utils.get_M_valid_points(M)
+    # points_mask = M_valid_pts_mask.any(dim=0) # M_valid_pts_mask is False for the entire column of such points, so we just need to check for which columns of the mask there are True entries.
+    # if M.is_cuda:
+    #     M = M[:, points_mask]
+    #     if data.store_depth_targets:
+    #         depths = depths[:, points_mask]
+    # else:
+    #     # NOTE: Workaround for bug in nonzero_out_cpu(), internally called by pytorch during advanced indexing operation.
+    #     idx = np.nonzero(points_mask.numpy())[0]
+    #     assert len(idx.shape) == 1, 'Expected 1D-array, but encountered idx.shape == {}'.format(idx.shape)
+    #     M = M[:, torch.from_numpy(idx)]
+    #     if data.store_depth_targets:
+    #         depths = depths[:, torch.from_numpy(idx)]
 
     sampled_data = SceneData(
         M,
@@ -383,105 +384,6 @@ def sample_data(data, num_samples, adjacent=True):
         warnings.warn('Cameras with no points for dataset '+ data.scene_name)
 
     return sampled_data
-
-
-def apply_rotational_homography_aug(
-    data,
-    inplane_rot_aug_max_angle = None, # If provided, activates and sets the maximum angle (in degrees) for random in-plane rotation applied on camera matrices and image points, resulting in data augmentation.
-    tilt_rot_aug_max_angle = None, # If provided, activates and sets the maximum angle (in degrees) for random out-of-plane (tilt) rotation applied on camera matrices and image points, resulting in data augmentation.
-):
-    device = data.device
-
-    num_views = data.y.shape[0]
-    num_scene_pts = data.M.shape[1]
-    assert data.y.shape == (num_views, 3, 4)
-    assert data.Ns.shape == (num_views, 3, 3)
-    assert data.M.shape == (2*num_views, num_scene_pts)
-
-    depths = data.depths
-    if data.store_depth_targets:
-        assert depths is not None
-
-    # Apply homography data augmentation
-    if inplane_rot_aug_max_angle is not None or tilt_rot_aug_max_angle is not None:
-        # assert data.calibrated, 'Attempting to apply rotational homography augmentation on non-calibrated cameras & image points. Without calibration, while we can always perform homography augmentation, the geometrical rotation matrix sampling below assumes application on calibrated image points.'
-
-        R_aug = torch.eye(3)[None, :, :].repeat(num_views, 1, 1)
-
-        # First apply in-plane rotation
-        if inplane_rot_aug_max_angle is None:
-            inplane_rot_aug_max_angle = 0
-        assert inplane_rot_aug_max_angle >= 0
-        if inplane_rot_aug_max_angle > 0:
-            inplane_angle = inplane_rot_aug_max_angle * (2*torch.rand((num_views,), dtype=torch.float32, device=device) - 1)
-            inplane_rotation_vector = torch.zeros((num_views, 3), dtype=torch.float32, device=device)
-            inplane_rotation_vector[:, 2] = inplane_angle / 180. * math.pi
-            R_inplane = axis_angle_to_matrix(inplane_rotation_vector)
-            R_aug = R_inplane @ R_aug
-
-        # Next apply out-of-plane (tilt) rotation
-        if tilt_rot_aug_max_angle is None:
-            tilt_rot_aug_max_angle = 0
-        assert tilt_rot_aug_max_angle >= 0
-        if tilt_rot_aug_max_angle > 0:
-            tilt_angle = tilt_rot_aug_max_angle * (2*torch.rand((num_views,), dtype=torch.float32, device=device) - 1)
-            tilt_axis_alpha = torch.rand((num_views,), dtype=torch.float32, device=device) * 2 * math.pi
-            # Random unit vectors in the z=0 plane.
-            tilt_axis = torch.zeros((num_views, 3), dtype=torch.float32, device=device)
-            tilt_axis[:, 0] = torch.cos(tilt_axis_alpha)
-            tilt_axis[:, 1] = torch.sin(tilt_axis_alpha)
-            R_tilt = axis_angle_to_matrix(tilt_axis * tilt_angle[:, None] / 180. * math.pi)
-            R_aug = R_tilt @ R_aug
-
-
-        # Apply the augmentation transformation on all camera matrices and image points
-        H_aug = torch.linalg.inv(data.Ns) @ R_aug @ data.Ns
-        y = H_aug @ data.y
-        # TODO: Can be implemented more efficiently / sparsely, using sparsity pattern in data.valid_pts.
-        img_pts_old_unnorm = torch.cat([ # Old unnormed (pixel) coordinates
-            data.M.reshape(num_views, 2, num_scene_pts), # (2*num_views, num_scene_pts) -> (num_views, 2, num_scene_pts)
-            torch.ones((num_views, 1, num_scene_pts), dtype=torch.float32, device=device),
-        ], dim=1) # (num_views, 3, num_scene_pts)
-        img_pts_old_norm = data.Ns @ img_pts_old_unnorm # Unnormalized (pixel) coordinates -> calibrated coordinates
-        img_pts_new_norm = R_aug @ img_pts_old_norm # Old -> new image points, applying the R_aug homography on the normalized points
-        img_pts_new_unnorm = torch.linalg.inv(data.Ns) @ img_pts_new_norm # Calibrated coordinates -> unnormalized (pixel) coordinates
-        img_pts = geo_utils.batch_pflat(img_pts_new_unnorm)[:, :2, :] # (num_views, 2, num_scene_pts)
-        img_pts = img_pts.transpose(1, 2) # (num_views, num_scene_pts, 2)
-        # In case exact zero-ness has not been preserved throughout all numerical operations, perform explicit zero-reset:
-        if img_pts.is_cuda:
-            img_pts[~data.valid_pts, :] = 0
-        else:
-            # Circumvent implicit call to torch nonzero_cpu() when perofrming advanced tensor indexing. Instead do an explicit np.nonzero() call.
-            # assert not img_pts.requires_grad # If we don't require gradient tracking, it simplifies the replacement of torch operations with numpy operations.
-            idx1, idx2 = np.nonzero((~data.valid_pts).detach().numpy())
-            img_pts[idx1, idx2, :] = 0 # This is a torch indexing operation
-        img_pts = img_pts.transpose(1, 2) # (num_views, 2, num_scene_pts)
-        M = img_pts.reshape(2*num_views, num_scene_pts) # (2*num_views, num_scene_pts)
-
-        if data.store_depth_targets:
-            # Rescale the depths according to the relative effect on the 3rd coordinate when applying the rotation homography matrix.
-            # While a camera rotation around its center will of course not affect the camera-to-point distances, the depths will be affected, as they are the "distances" in the z-direction.
-            depths = depths / img_pts_old_norm[:, 2, :] * img_pts_new_norm[:, 2, :]
-    else:
-        y = data.y
-        M = data.M
-
-    Ns = data.Ns
-
-    # TODO: Truncation of "out-of-bounds" image points..?
-
-    sampled_data = SceneData(
-        M,
-        Ns,
-        y,
-        data.scene_name,
-        calibrated = data.calibrated,
-        store_depth_targets = data.store_depth_targets,
-        depths = depths,
-    )
-
-    return sampled_data
-
 
 def create_scene_data_from_list(scene_names_list, conf):
     data_list = []
@@ -579,6 +481,7 @@ def get_subset(data, subset_size):
 
     indices = torch.sort(torch.tensor(indices))[0]
     M_indices = torch.sort(torch.cat((2 * indices, 2 * indices + 1)))[0]
+    M = M[:, (M > 0).sum(dim=0) > 2]
 
     depths = data.depths
     if data.store_depth_targets:
@@ -590,19 +493,19 @@ def get_subset(data, subset_size):
         depths = depths[indices, :]
 
     # Additional point filtering, discarding points that are not visible in at least MIN_N_VIEWS_PER_POINT views:
-    M_valid_pts_mask = dataset_utils.get_M_valid_points(M)
-    points_mask = M_valid_pts_mask.any(dim=0) # M_valid_pts_mask is False for the entire column of such points, so we just need to check for which columns of the mask there are True entries.
-    if M.is_cuda:
-        M = M[:, points_mask]
-        if data.store_depth_targets:
-            depths = depths[:, points_mask]
-    else:
-        # NOTE: Workaround for bug in nonzero_out_cpu(), internally called by pytorch during advanced indexing operation.
-        idx = np.nonzero(points_mask.numpy())[0]
-        assert len(idx.shape) == 1, 'Expected 1D-array, but encountered idx.shape == {}'.format(idx.shape)
-        M = M[:, torch.from_numpy(idx)]
-        if data.store_depth_targets:
-            depths = depths[:, torch.from_numpy(idx)]
+    # M_valid_pts_mask = dataset_utils.get_M_valid_points(M)
+    # points_mask = M_valid_pts_mask.any(dim=0) # M_valid_pts_mask is False for the entire column of such points, so we just need to check for which columns of the mask there are True entries.
+    # if M.is_cuda:
+    #     M = M[:, points_mask]
+    #     if data.store_depth_targets:
+    #         depths = depths[:, points_mask]
+    # else:
+    #     # NOTE: Workaround for bug in nonzero_out_cpu(), internally called by pytorch during advanced indexing operation.
+    #     idx = np.nonzero(points_mask.numpy())[0]
+    #     assert len(idx.shape) == 1, 'Expected 1D-array, but encountered idx.shape == {}'.format(idx.shape)
+    #     M = M[:, torch.from_numpy(idx)]
+    #     if data.store_depth_targets:
+    #         depths = depths[:, torch.from_numpy(idx)]
 
     return SceneData(
         M,

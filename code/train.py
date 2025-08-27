@@ -47,7 +47,11 @@ def epoch_evaluation(data_loader, model, conf, epoch, phase, save_predictions=Fa
     errors = None
     model.eval()
     with torch.no_grad():
-        for batch_data in data_loader:
+        for j, batch_data in enumerate(data_loader):
+            print('Scene batch {}/{}.'.format(j+1, len(data_loader)))
+            for curr_data in batch_data:
+                print("Memory before eval on {}: Allocated {} MiB, reserved {} MiB.".format(curr_data.scene_name, torch.cuda.memory_allocated()//2**20, torch.cuda.memory_reserved()//2**20))
+
             # A batch of scenes
             for curr_data in batch_data:
                 # One scene

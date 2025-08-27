@@ -7,7 +7,7 @@ import copy
 
 
 
-def is_valid_sample(data, min_pts_per_cam=10, phase=Phases.TRAINING):
+def is_valid_sample(data, min_pts_per_cam=8, phase=Phases.TRAINING):
     if phase is Phases.TRAINING:
         return data.x.pts_per_cam.min().item() >= min_pts_per_cam
     else:

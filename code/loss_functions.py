@@ -193,6 +193,76 @@ class GTLoss(nn.Module):
 
         return loss
 
+class DirectDepthLoss(nn.Module):
+    """
+    """
+    def __init__(self, conf):
+        super().__init__()
+        assert conf.get_bool('model.depth_head.enabled')
+        self.cost_fcn = conf.get_string('loss.cost_fcn')
+        assert self.cost_fcn in ['L1', 'L2']
+        if not conf.get_bool('dataset.calibrated'):
+            # NOTE: Even in the uncalibrated case, the depth should be possible to infer by normalizing the camera matrix such that the third row has unit length...
+            raise NotImplementedError
+
+    def forward(self, pred_dict, data, epoch=None):
+        depths_pred = geo_utils.extract_specified_depths(
+            depths_sparsemat = pred_dict['depths'],
+        )
+        depths_gt = geo_utils.extract_specified_depths(
+            depths_dense = data.depths,
+            indices = pred_dict['depths'].indices, # Use the same indices as above, to make sure the predicted & GT depth values are in a aingle consistent order.
+        )
+
+        # Determine depth scale
+        s_pred = geo_utils.determine_depth_scale(depth_values=depths_pred)
+        s_gt = geo_utils.determine_depth_scale(depth_values=depths_gt)
+        # NOTE: Currently, the total depth scale is determined by considering the depths of all projections as a collection of independent samples.
+        # This is a quite simple approach. In case we e.g. want to average the depths first per each view and then across all views, we would need to pass the original sparse matrix of depths to the above function instead of the extracted specified elements.
+        # s_pred = geo_utils.determine_depth_scale(depths_sparsemat=pred_dict['depths'])
+        # s_gt = geo_utils.determine_depth_scale(depths_dense=data.depths, indices=pred_dict['depths'].indices)
+
+        # Normalize depths
+        depths_pred = depths_pred / s_pred
+        depths_gt = depths_gt / s_gt
+
+        # TODO: Add a (small) depth scale regularization, e.g. reg_weight * (s_pred - 1.0)**2
+
+        if self.cost_fcn == 'L1':
+            loss = torch.mean(torch.abs(depths_pred - depths_gt))
+        elif self.cost_fcn == 'L2':
+            loss = torch.mean((depths_pred - depths_gt)**2)
+        else:
+            assert False
+
+        return loss
+
+class ExpDepthRegularizedOSELoss(nn.Module):
+    """
+    Implements the combination of Object Space Error (OSE) and an exponential depth regularization term, for pushing scene points in front of the camera.
+    The result is a smooth loss function without a barrier at the principal plane.
+    For each projected point, the OSE can be seen as a reprojection error computed at a z-shifted image plane, such that its depth equals the predicted depth.
+    """
+    def __init__(self, conf):
+        super().__init__()
+        assert conf.get_bool('model.view_head.enabled', default=False)
+        assert conf.get_bool('model.scenepoint_head.enabled', default=False)
+        self.depth_regul_weight = conf.get_float("loss.depth_regul_weight")
+
+    def forward(self, pred_dict, data, epoch=None):
+        Ps = pred_dict["Ps_norm"]
+        pts_2d = Ps @ pred_dict["pts3D"]  # [m, 3, n]
+
+        # Calculate exponential depth regularizaiton term
+        depth_reg_term = self.depth_regul_weight * torch.exp(-pts_2d[:, 2, :])
+
+        # Calculate OSE
+        pts_2d_gt = data.norm_M.reshape(Ps.shape[0], 2, -1) # (m, 2, n)
+        ose_err = (pts_2d[:, :2, :] - pts_2d[:, [2], :]*pts_2d_gt).norm(dim=1)
+
+        assert data.valid_pts.is_cuda # If not, we would have to modify the masking below, to avoid an implicit call to pytorch's buggy CPU-implementation of nonzero.
+        return (ose_err + depth_reg_term)[data.valid_pts].mean()
+
 
 
 
