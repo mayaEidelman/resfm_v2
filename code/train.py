@@ -99,7 +99,7 @@ def epoch_train(conf, train_data, model, loss_func, optimizer, scheduler, epoch,
     model.train()
     train_losses = []
     train_metrics = []
-
+    
     for train_batch in train_data:
         batch_loss = torch.tensor([0.0], device=train_data.device)
         optimizer.zero_grad()
@@ -226,6 +226,8 @@ def train(conf, train_data, model, phase, validation_data=None, test_data=None, 
     begin_time = time()
 
     # === Training Loop ===
+    print(f'Started training with epoch number: {num_of_epochs}, phase: {phase}, output mode: {OUTPUT_MODES_TYPES[conf.get_int("model.output_mode", default=3)]}, data length: {len(train_data)}')
+
     for epoch in range(conf["resuming_epoch"] + 1, num_of_epochs):
         ba_during_training = not conf.get_bool('ba.only_last_eval') and conf.get_bool('ba.run_ba', default=True)
 
@@ -240,7 +242,7 @@ def train(conf, train_data, model, phase, validation_data=None, test_data=None, 
                 train_metrics_means = CalcMeanBatchMetrics(train_metrics, phase)
                 wandb.log(train_metrics_means, step=epoch)
             if epoch % 100 == 0:
-                print(f'{fabric.global_rank}:{epoch} Train Loss: {mean_train_loss}')
+                print(f'{fabric.global_rank}:{epoch} Train Loss: {mean_train_loss} LR: {scheduler.get_last_lr()[-1]} Time so far: {time() - begin_time}')
 
 
         # === Evaluation ===
