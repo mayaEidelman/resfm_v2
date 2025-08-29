@@ -59,7 +59,7 @@ class SetOfSetOutliersNet(BaseNet):
         for i in range(num_blocks - 1):
             self.equivariant_blocks.append(SetOfSetBlock(num_feats, num_feats, conf))
 
-        self.pairwise_mlp = get_linear_layers([7, 64, num_feats], final_layer=True, batchnorm=False)
+        self.pairwise_mlp = get_linear_layers([4, 64, num_feats], final_layer=True, batchnorm=False)
         self.m_net = get_linear_layers([num_feats * 2] * 2 + [m_d_out], final_layer=True, batchnorm=False)
         self.n_net = get_linear_layers([num_feats] * 2 + [n_d_out], final_layer=True, batchnorm=False)
         self.outlier_net = get_linear_layers([num_feats] * 2 + [1], final_layer=True, batchnorm=False)
@@ -100,8 +100,8 @@ class SetOfSetOutliersNet(BaseNet):
             # Cameras predictions
             m_input = x.mean(dim=1) # [m,d_out]
             
-            # Process pairwise relations
-            pairwise_features = self.pairwise_mlp(data.pairwise_relations).mean(dim=1)
+            # Process pairwise epipoles
+            pairwise_features = self.pairwise_mlp(data.pairwise_epipoles).mean(dim=1)
 
             # Concatenate with existing camera features
             m_input = torch.cat([m_input, pairwise_features], dim=1)

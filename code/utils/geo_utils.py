@@ -1,3 +1,4 @@
+from itertools import combinations
 import torch
 import cv2
 import numpy as np
@@ -176,20 +177,51 @@ def batch_get_cross_product_matrix(t):
 	return T
 
 
-def batch_get_relative_pose(rotations, translations):
-	"""
-	Computes the relative pose (translation and flattened rotation matrix) 
-	between all pairs of cameras in an efficient, vectorized manner.
-	"""
-	reltative_rotations = torch.matmul(rotations.transpose(1, 2).unsqueeze(1), rotations.unsqueeze(0))
-	relative_quaternions = rotation_matrix_to_quaternion(reltative_rotations)
+def calculate_pairwise_essential_matrices(M, Ns):
+	num_cameras = Ns.shape[0]
 	
-	translation_deltas = translations.unsqueeze(0) - translations.unsqueeze(1)
-	relative_translations = torch.matmul(rotations.transpose(1, 2).unsqueeze(1), translation_deltas.unsqueeze(-1)).squeeze(-1)
+	visibility_mask = M.view(num_cameras, 2, -1)[:, 0, :] != 0
+	norm_M = normalize_M(M, Ns).view(num_cameras, -1, 2)
 
-	relative_poses = torch.cat([relative_translations, relative_quaternions], dim=2)
+	essential_matrices = []
+	valid_pairs_indices = []
 
-	return relative_poses
+	for i, j in combinations(range(num_cameras), 2):
+		common_mask = visibility_mask[i] & visibility_mask[j]
+
+		if common_mask.sum() < 8:
+			continue
+
+		pts_i, pts_j = norm_M[i, common_mask, :].cpu().numpy(), norm_M[j, common_mask, :].cpu().numpy()
+		
+		E, _ = cv2.findEssentialMat(
+			pts_i, pts_j, cameraMatrix=np.eye(3), method=cv2.RANSAC, prob=0.9, threshold=0.1
+		)
+
+		if E is not None:
+			essential_matrices.append(torch.from_numpy(E).float())
+			valid_pairs_indices.append(torch.tensor([i, j]))
+
+	essential_matrices = torch.stack(essential_matrices).to(M.device)
+	valid_pairs = torch.stack(valid_pairs_indices)
+
+	return essential_matrices, valid_pairs
+
+
+def compute_pairwise_epipoles(M, Ns):
+	print("Entered function")
+	num_cameras = Ns.shape[0]
+	pairwise_epipoles = torch.zeros([num_cameras, num_cameras, 4], device=M.device)
+
+	essential_matrices, valid_pairs = calculate_pairwise_essential_matrices(M, Ns)
+	_, _, Vt_E = torch.linalg.svd(essential_matrices)
+	_, _, Vt_ET = torch.linalg.svd(essential_matrices.transpose(1, 2))
+
+	e_i, e_j = Vt_ET[:, -1, :] / Vt_ET[:, -1, -1:], Vt_E[:, -1, :] / Vt_E[:, -1, -1:]
+	pairwise_epipoles[valid_pairs[:, 0], valid_pairs[:, 1], :] = torch.cat([e_i[:, :2], e_j[:, :2]], dim=1)
+	pairwise_epipoles[valid_pairs[:, 1], valid_pairs[:, 0], :] = torch.cat([e_j[:, :2], e_i[:, :2]], dim=1)
+
+	return pairwise_epipoles
 
 
 def batch_get_bifocal_tensors(Rs, ts):
