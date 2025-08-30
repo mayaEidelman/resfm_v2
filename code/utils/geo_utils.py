@@ -209,7 +209,6 @@ def calculate_pairwise_essential_matrices(M, Ns):
 
 
 def compute_pairwise_epipoles(M, Ns):
-	print("Entered function")
 	num_cameras = Ns.shape[0]
 	pairwise_epipoles = torch.zeros([num_cameras, num_cameras, 4], device=M.device)
 

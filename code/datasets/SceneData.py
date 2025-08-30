@@ -101,7 +101,7 @@ def sample_data(data, num_samples, adjacent=True):
 
     M = M[:, (M > 0).sum(dim=0) > 2]
 
-    pairwise_epipoles = data.pairwise_epipoles[indices, indices, :]
+    pairwise_epipoles = data.pairwise_epipoles[indices][:, indices]
 
     sampled_data = SceneData(M, Ns, y, data.scan_name,outliers=outlier_indices, nameslist=data.img_list[indices], pairwise_epipoles=pairwise_epipoles)
     if (sampled_data.x.pts_per_cam == 0).any():
