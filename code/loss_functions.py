@@ -146,6 +146,13 @@ class PairwiseConsistencyLoss(nn.Module):
         absolute_pose_loss = self.absolut_Rt_loss(pred_cam, data, Ps_pred.device)
         pairwise_pose_loss = self.pairwise_Rt_loss(pred_cam, data, Ps_pred.device)
 
+        total_loss = (absolute_pose_loss + pairwise_epipole_loss)/2
+        # total_loss = (pairwise_pose_loss )
+        # try:
+        #     print(f"Pairwise Loss: {total_loss.item():.6f}, Absolute Pose: {absolute_pose_loss.item():.6f}, Pairwise Consistency: {pairwise_pose_loss.item():.6f}")
+        # except Exception:
+        #     pass
+        
         total_loss = (absolute_pose_loss + pairwise_pose_loss)/2
         try:
             print(f"Pairwise Loss: {total_loss.item():.6f}, Absolute Pose: {absolute_pose_loss.item():.6f}, Pairwise Consistency: {pairwise_pose_loss.item():.6f}")
