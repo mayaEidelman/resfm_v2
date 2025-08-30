@@ -1,5 +1,6 @@
-from pytorch3d.transforms import axis_angle_to_matrix
+# from pytorch3d.transforms import axis_angle_to_matrix
 import copy
+import logging
 import math
 import torch
 from utils import geo_utils, dataset_utils, sparse_utils
@@ -142,6 +143,7 @@ class SceneData:
         self.graph_wrappers = self.create_axial_aggregation_graphs(
             self.x,
         )
+        logging.info('Scene data has initialized')
 
     @property
     def M(self):
