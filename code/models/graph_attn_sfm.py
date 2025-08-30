@@ -186,7 +186,6 @@ class GraphAttnSfMNet(BaseNet):
 
             outliers_out = self.outlier_net(projection_features.values)
             outliers_out = torch.sigmoid(outliers_out)
-            print(outliers_out)
         else:
             outliers_out = None
 
