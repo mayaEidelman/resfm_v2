@@ -62,7 +62,7 @@ class GraphAttnSfMNet(BaseNet):
 
         # Match outlier MLP input to the final projection feature dimension
         outlier_in_dim = n_feat_proj_depth_head if self.depth_head_enabled else n_feat_proj
-        self.outlier_net = get_linear_layers([outlier_in_dim, num_feats, num_feats, 1], final_activation=True, norm=False)
+        self.outlier_net = get_linear_layers_for_outliers([outlier_in_dim, num_feats, num_feats, 1], final_layer=True, batchnorm=True)
         if phase is Phases.FINE_TUNE:
             self.mode = 1
         else:
@@ -186,6 +186,7 @@ class GraphAttnSfMNet(BaseNet):
 
             outliers_out = self.outlier_net(projection_features.values)
             outliers_out = torch.sigmoid(outliers_out)
+            print(outliers_out)
         else:
             outliers_out = None
 

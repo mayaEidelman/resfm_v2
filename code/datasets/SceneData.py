@@ -326,7 +326,7 @@ def create_scene_data(
         nameslist=namesList,
         M_original=M_original
     )
-    assert dataset_utils.is_valid_sample(scene_data)
+    # assert dataset_utils.is_valid_sample(scene_data)
     return scene_data
 
 

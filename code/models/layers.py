@@ -1,5 +1,5 @@
 import torch
-from torch.nn import Linear, ReLU, LayerNorm, Sequential, Module, Identity
+from torch.nn import Linear, ReLU, LayerNorm, Sequential, Module, Identity, BatchNorm1d
 from torch.nn import functional as F
 import torch_geometric
 from utils.sparse_utils import SparseMat
@@ -40,6 +40,28 @@ def get_linear_layers(feats, init_activation=False, final_activation=False, norm
             layers.append(LayerNorm(feats[-1]))
 
         layers.append(ReLU(inplace=True))
+
+    return Sequential(*layers)
+
+def get_linear_layers_for_outliers(feats, final_layer=False, batchnorm=True):
+    layers = []
+
+    # Add layers
+    for i in range(len(feats) - 2):
+        layers.append(Linear(feats[i], feats[i + 1]))
+
+        if batchnorm:
+            layers.append(BatchNorm1d(feats[i + 1], track_running_stats=False))
+
+        layers.append(ReLU())
+
+    # Add final layer
+    layers.append(Linear(feats[-2], feats[-1]))
+    if not final_layer:
+        if batchnorm:
+            layers.append(BatchNorm1d(feats[-1], track_running_stats=False))
+
+        layers.append(ReLU())
 
     return Sequential(*layers)
 
@@ -1013,3 +1035,17 @@ class EmbeddingLayer(Module):
             embeded_features = self.post_embed_lin(embeded_features)
         new_shape = (x.shape[0], x.shape[1], embeded_features.shape[1])
         return SparseMat(embeded_features, x.indices, x.cam_per_pts, x.pts_per_cam, new_shape)
+
+class EmbeddingLayer_outliers(Module):
+    def __init__(self, multires, in_dim):
+        super(EmbeddingLayer_outliers, self).__init__()
+        if multires > 0:
+            self.embed, self.d_out = get_embedder(multires, in_dim)
+        else:
+            self.embed, self.d_out = (Identity(), in_dim)
+
+    def forward(self, x):
+        embeded_features = self.embed(x.values)
+        new_shape = (x.shape[0], x.shape[1], embeded_features.shape[1])
+        return SparseMat(embeded_features, x.indices, x.cam_per_pts, x.pts_per_cam, new_shape)
+

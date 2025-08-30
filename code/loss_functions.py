@@ -129,6 +129,7 @@ class CombinedLoss(nn.Module):
         ESFMLoss = torch.tensor([0], device=pred_outliers.device)
 
         # Reprojection loss (geometric loss)
+
         if self.alpha:
             ESFMLoss = self.weighted_ESFM_loss(pred_cam, pred_outliers, data)
 
@@ -136,7 +137,7 @@ class CombinedLoss(nn.Module):
         if self.beta:
             classificationLoss = self.outliers_loss(pred_outliers, data)
 
-
+        # print(self.alpha * ESFMLoss, self.beta * classificationLoss, self.alpha, self.beta)
         loss = self.alpha * ESFMLoss + self.beta * classificationLoss
 
         return loss
