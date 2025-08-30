@@ -140,11 +140,21 @@ class PairwiseConsistencyLoss(nn.Module):
         self.pairwise_pose_weight = conf.get_float("loss.pairwise_pose_weight", default=1.0)
         self.calibrated = conf.get_bool('dataset.calibrated')
 
+    def forward1(self, pred_cam, data, epoch=None):
+        pairwise_epipole_loss = pairwise_utils.pairwise_epipole_loss(data, pred_cam)
+        return pairwise_epipole_loss
+
     def forward(self, pred_cam, data, epoch=None):
         Ps_pred = pred_cam["Ps_norm"]
 
-        absolute_pose_loss = self.absolut_Rt_loss(pred_cam, data, Ps_pred.device)
-        pairwise_pose_loss = self.pairwise_Rt_loss(pred_cam, data, Ps_pred.device)
+        Rs_pred, ts_pred = geo_utils.decompose_camera_matrix(Ps_pred)
+        Ks_invT = getattr(data, 'Ns_invT', None)
+        Ks = Ks_invT.transpose(1, 2) if Ks_invT is not None else None
+        Rs_gt, ts_gt = geo_utils.decompose_camera_matrix(data.y.to(Ps_pred.device), Ks.to(Ps_pred.device) if Ks is not None else None)
+
+        absolute_pose_loss = self.absolut_Rt_loss(Rs_pred, ts_pred, Rs_gt, ts_gt, Ps_pred.device)
+        # pairwise_pose_loss = self.pairwise_Rt_loss(Rs_pred, ts_pred, Rs_gt, ts_gt, Ps_pred.device)
+        pairwise_epipole_loss = pairwise_utils.pairwise_epipole_loss(data, Rs_pred, ts_pred, Ps_pred.device)
 
         total_loss = (absolute_pose_loss + pairwise_epipole_loss)/2
         # total_loss = (pairwise_pose_loss )
@@ -152,12 +162,6 @@ class PairwiseConsistencyLoss(nn.Module):
         #     print(f"Pairwise Loss: {total_loss.item():.6f}, Absolute Pose: {absolute_pose_loss.item():.6f}, Pairwise Consistency: {pairwise_pose_loss.item():.6f}")
         # except Exception:
         #     pass
-        
-        total_loss = (absolute_pose_loss + pairwise_pose_loss)/2
-        try:
-            print(f"Pairwise Loss: {total_loss.item():.6f}, Absolute Pose: {absolute_pose_loss.item():.6f}, Pairwise Consistency: {pairwise_pose_loss.item():.6f}")
-        except Exception:
-            pass
         return total_loss
         
     def forward2(self, pred_cam, data, epoch=None):
@@ -295,11 +299,11 @@ class PairwiseConsistencyLoss(nn.Module):
         
         return total_loss
 
-    def pairwise_Rt_loss(self, pred_cam, data, device=None):
+    def pairwise_Rt_loss(self, Rs_pred, ts_pred, Rs_gt, ts_gt, device=None):
         pairwise_pose_loss = torch.tensor(0.0, device=device, requires_grad=True)
         if self.pairwise_pose_weight > 0.0:
             try:
-                rotation_loss, translation_loss = pairwise_utils.compute_pairwise_pose_consistency(pred_cam, data, device)
+                rotation_loss, translation_loss = pairwise_utils.compute_pairwise_pose_consistency(Rs_pred, ts_pred, Rs_gt, ts_gt, device)
                 pairwise_pose_loss = (rotation_loss + translation_loss)/2
             except Exception as e:
                 print(f"Warning: Failed to compute pairwise pose consistency loss: {e}")
@@ -308,11 +312,11 @@ class PairwiseConsistencyLoss(nn.Module):
         return pairwise_pose_loss
         
 
-    def absolut_Rt_loss(self, pred_cam, data, device):
+    def absolut_Rt_loss(self, Rs_pred, ts_pred, Rs_gt, ts_gt, device):
         absolute_pose_loss = torch.tensor(0.0, device=device, requires_grad=True)
         if self.absolute_pose_weight > 0.0:
             try:
-                rotation_loss, translation_loss = pairwise_utils.compute_absolute_pose_consistency(pred_cam, data, self.calibrated, device)
+                rotation_loss, translation_loss = pairwise_utils.compute_absolute_pose_consistency(Rs_pred, ts_pred, Rs_gt, ts_gt, self.calibrated, device)
                 absolute_pose_loss = (rotation_loss + translation_loss)/2
             except Exception as e:
                 print(f"Warning: Failed to compute absolute pose consistency loss: {e}")

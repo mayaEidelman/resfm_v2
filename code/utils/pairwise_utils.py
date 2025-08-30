@@ -345,28 +345,32 @@ def evaluate_pairwise_consistency(data, pred_cam):
     
     return metrics 
 
-def compute_absolute_pose_consistency(pred_cam, data, calibrated=True, device=None):
+def compute_absolute_pose_consistency(Rs_pred, ts_pred, Rs_gt, ts_gt, calibrated=True, device=None):
         """
         Compute absolute pose consistency loss using the same method as evaluation.py.
         This aligns predicted poses with ground truth and computes rotation/translation errors.
         """
         if not calibrated:
-            return torch.tensor(0.0, device=pred_cam["Ps_norm"].device, requires_grad=True)
+            return torch.tensor(0.0, device=device, requires_grad=True)
         
         # Extract predicted poses using the same method as evaluation.py
-        Ps_norm = pred_cam["Ps_norm"]  # [m, 3, 4]
+        # Ps_norm = pred_cam["Ps_norm"]  # [m, 3, 4]
         
-        # Convert to numpy for geo_utils functions (they expect numpy)
-        Ps_norm_np = Ps_norm.detach().cpu().numpy()
+        # # Convert to numpy for geo_utils functions (they expect numpy)
+        # Ps_norm_np = Ps_norm.detach().cpu().numpy()
         
-        # Decompose camera matrices to get rotations and translations
-        Rs_pred_np, ts_pred_np = geo_utils.decompose_camera_matrix(Ps_norm_np)
+        # # Decompose camera matrices to get rotations and translations
+        # Rs_pred_np, ts_pred_np = geo_utils.decompose_camera_matrix(Ps_norm_np)
         
-        # Get ground truth poses
-        Ns_inv = data.Ns_invT.transpose(1, 2).cpu().numpy()
-        Rs_gt_np, ts_gt_np = geo_utils.decompose_camera_matrix(data.y.cpu().numpy(), Ns_inv)
-        
+        # # Get ground truth poses
+        # Ns_inv = data.Ns_invT.transpose(1, 2).cpu().numpy()
+        # Rs_gt_np, ts_gt_np = geo_utils.decompose_camera_matrix(data.y.cpu().numpy(), Ns_inv)
+
         # Align predicted poses with ground truth using the same alignment as evaluation.py
+        Rs_pred_np = Rs_pred.detach().cpu().numpy()
+        Rs_gt_np = Rs_gt.detach().cpu().numpy()
+        ts_pred_np = ts_pred.detach().cpu().numpy()
+        ts_gt_np = ts_gt.detach().cpu().numpy()
         Rs_fixed_np, ts_fixed_np, _ = geo_utils.align_cameras(
             Rs_pred_np, Rs_gt_np, ts_pred_np, ts_gt_np, return_alignment=True
         )
@@ -417,70 +421,64 @@ def compute_epipolar_constraint_error(F, pts1, pts2):
     # Symmetric epipolar distance
     return torch.median(dist1 + dist2) # I changed here to median instead of meanto make it more robust to outliers but dont know it its ok :/
 
-def relative_pose_matrix_loss(relative_poses_pred, relative_poses_gt, rotation_weight=0.5, translation_weight=0.5, eps=1e-7):
+def relative_pose_matrix_loss(relative_poses_pred, relative_poses_gt, eps=1e-7):
     """
-    Compute loss between two relative-pose matrices produced by `geo_utils.batch_get_relative_pose`.
-
+    Vectorized loss between two relative-pose matrices.
     Args:
         relative_poses_pred: Tensor [n, n, 7] with [tx, ty, tz, w, x, y, z]
         relative_poses_gt:   Tensor [n, n, 7] with same layout
-        rotation_weight:     Scalar weight for rotation loss
-        translation_weight:  Scalar weight for translation-direction loss
-        eps:                 Small constant for numerical stability
-
     Returns:
-        total_loss, rot_loss_mean, trans_loss_mean (all scalars)
+        rot_loss (scalar), trans_loss (scalar)
     """
-    assert relative_poses_pred.shape == relative_poses_gt.shape, "Pred/GT shapes must match"
-    assert relative_poses_pred.shape[-1] == 7, "Relative pose tensors must have 7 channels (t[3] + q[4])"
 
-    n = relative_poses_pred.shape[0]
-    device = relative_poses_pred.device
+    # Split
+    t_pred, q_pred = relative_poses_pred[..., :3], relative_poses_pred[..., 3:]
+    t_gt,   q_gt   = relative_poses_gt[...,   :3], relative_poses_gt[...,   3:]
 
-    # Exclude i == j pairs (identity)
-    offdiag_mask = ~torch.eye(n, dtype=torch.bool, device=device)
+    # Normalize quaternions
+    q_pred = F.normalize(q_pred, dim=-1)
+    q_gt   = F.normalize(q_gt,   dim=-1)
 
-    t_pred = relative_poses_pred[..., :3]
-    q_pred = relative_poses_pred[..., 3:]
-    t_gt   = relative_poses_gt[..., :3]
-    q_gt   = relative_poses_gt[..., 3:]
-
-    # Normalize quaternions and compute geodesic distance: 2*acos(|<q1, q2>|)
-    q_pred = F.normalize(q_pred, p=2, dim=-1)
-    q_gt   = F.normalize(q_gt,   p=2, dim=-1)
-    cos_q  = torch.sum(q_pred * q_gt, dim=-1).abs().clamp(min=-1.0 + eps, max=1.0 - eps)
+    # Rotation geodesic distance: 2*acos(|<q1, q2>|)
+    cos_q = torch.sum(q_pred * q_gt, dim=-1).abs()
+    cos_q = cos_q.clamp(min=-1.0 + eps, max=1.0 - eps)
     rot_loss = 2.0 * torch.acos(cos_q)
 
-    # Translation direction alignment: 1 - |cos(theta)| between directions
-    t_pred_n = F.normalize(t_pred, p=2, dim=-1)
-    t_gt_n   = F.normalize(t_gt,   p=2, dim=-1)
+    # Translation direction alignment: 1 - |cos(theta)|
+    t_pred_n = F.normalize(t_pred, dim=-1)
+    t_gt_n   = F.normalize(t_gt,   dim=-1)
     trans_loss = 1.0 - torch.sum(t_pred_n * t_gt_n, dim=-1).abs()
 
-    # Apply off-diagonal mask and average
-    rot_loss = rot_loss[offdiag_mask].mean()
-    trans_loss = trans_loss[offdiag_mask].mean()
+    # Mask out diagonal (i == j) in one go
+    n = relative_poses_pred.shape[0]
+    mask = ~torch.eye(n, dtype=torch.bool, device=relative_poses_pred.device)
+    mask = mask.view(n, n, 1).expand(-1, -1, 2)  # expand to match [n,n] losses
 
+    # Stack losses, mask, and reduce
+    losses = torch.stack([rot_loss, trans_loss], dim=-1)  # [n,n,2]
+    losses = losses[mask].view(-1, 2).mean(0)
+
+    rot_loss, trans_loss = losses[0], losses[1]
     return rot_loss, trans_loss
-
     
-def compute_pairwise_pose_consistency(pred_cam, data, device=None, rotation_weight=1.0, translation_weight=1.0):
+def compute_pairwise_pose_consistency(Rs_pred, ts_pred, Rs_gt, ts_gt, device=None, rotation_weight=1.0, translation_weight=1.0):
     """
     Compute pairwise pose consistency between predicted and ground-truth relative poses.
 
     Returns:
         rotation_loss, translation_loss (scalars)
     """
-    Ps_norm = pred_cam["Ps_norm"]  # [m, 3, 4]
+    # Ps_norm = pred_cam["Ps_norm"]  # [m, 3, 4]
     device = Ps_norm.device if device is None else device
 
     # Predicted absolute poses -> relative poses (torch branch)
-    Rs_pred, ts_pred = geo_utils.decompose_camera_matrix(Ps_norm)
+    
     relative_poses_pred = geo_utils.batch_get_relative_pose(Rs_pred, ts_pred)
 
     # Ground-truth absolute poses -> relative poses
-    Ks_invT = getattr(data, 'Ns_invT', None)
-    Ks = Ks_invT.transpose(1, 2) if Ks_invT is not None else None
-    Rs_gt, ts_gt = geo_utils.decompose_camera_matrix(data.y.to(device), Ks.to(device) if Ks is not None else None)
+    # Ks_invT = getattr(data, 'Ns_invT', None)
+    # Ks = Ks_invT.transpose(1, 2) if Ks_invT is not None else None
+    # Rs_gt, ts_gt = geo_utils.decompose_camera_matrix(data.y.to(device), Ks.to(device) if Ks is not None else None)
     relative_poses_gt = geo_utils.batch_get_relative_pose(Rs_gt, ts_gt)
 
     # Ensure same device/dtype
@@ -489,8 +487,37 @@ def compute_pairwise_pose_consistency(pred_cam, data, device=None, rotation_weig
 
     rot_loss, trans_loss = relative_pose_matrix_loss(
         relative_poses_pred, relative_poses_gt,
-        rotation_weight=rotation_weight,
-        translation_weight=translation_weight
     )
 
     return rot_loss, trans_loss
+
+
+
+def pairwise_epipole_loss(data, Rs_pred, ts_pred, device=None):
+        """
+        Compute loss between predicted and ground-truth pairwise epipoles.
+
+        Args:
+            data: SceneData object with .pairwise_epipoles [N, N, 4] (ground truth)
+            pred_cam: dict with "Ps_norm" [N, 3, 4] (predicted camera matrices)
+
+        Returns:
+            epipole_loss: scalar tensor (mean L2 loss over all valid pairs)
+        """
+        # Compute predicted pairwise epipoles [N, N, 4]
+        pred_epipoles = geo_utils.compute_pairwise_epipoles_from_Rt(Rs_pred, ts_pred)
+
+        # Get ground-truth pairwise epipoles [N, N, 4]
+        gt_epipoles = data.pairwise_epipoles.to(device, dtype=pred_epipoles.dtype)
+
+        # Only consider off-diagonal pairs (i != j)
+        N = gt_epipoles.shape[0]
+        mask = ~torch.eye(N, dtype=torch.bool, device=gt_epipoles.device)
+        mask = mask.unsqueeze(-1).expand(-1, -1, 4)  # [N, N, 4]
+
+        # Compute L2 loss per pair (over 4 epipole coords)
+        diff = (pred_epipoles - gt_epipoles)[mask].view(-1, 4)
+        loss = torch.norm(diff, dim=-1).mean() if diff.numel() > 0 else torch.tensor(0.0, device=Ps_pred.device, requires_grad=True)
+
+        return loss
+

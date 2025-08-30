@@ -6,6 +6,7 @@ from numpy.random._mt19937 import MT19937
 from numpy.random import Generator
 from utils import dataset_utils
 import dask.array as da
+from itertools import combinations
 # from kornia.geometry.conversions import rotation_matrix_to_quaternion
 
 
@@ -771,3 +772,88 @@ def rotation_matrix_to_quaternion(rotation_matrix, eps=1e-6):
                     t2_rep * mask_c2 + t3_rep * mask_c3)  # noqa
     q *= 0.5
     return q
+
+###################################################################
+def calculate_pairwise_essential_matrices(M, Ns):
+	num_cameras = Ns.shape[0]
+
+	visibility_mask = M.view(num_cameras, 2, -1)[:, 0, :] != 0
+	norm_M = normalize_M(M, Ns).view(num_cameras, -1, 2)
+
+	essential_matrices = []
+	valid_pairs_indices = []
+
+	for i, j in combinations(range(num_cameras), 2):
+		common_mask = visibility_mask[i] & visibility_mask[j]
+
+		if common_mask.sum() < 8:
+			continue
+
+		pts_i, pts_j = norm_M[i, common_mask, :].cpu().numpy(), norm_M[j, common_mask, :].cpu().numpy()
+
+		E, _ = cv2.findEssentialMat(
+			pts_i, pts_j, cameraMatrix=np.eye(3), method=cv2.RANSAC, prob=0.9, threshold=0.1
+		)
+
+		if E is not None:
+			essential_matrices.append(torch.from_numpy(E).float())
+			valid_pairs_indices.append(torch.tensor([i, j]))
+
+	essential_matrices = torch.stack(essential_matrices).to(M.device)
+	valid_pairs = torch.stack(valid_pairs_indices)
+
+	return essential_matrices, valid_pairs
+
+
+def compute_pairwise_epipoles(M, Ns):
+	num_cameras = Ns.shape[0]
+	pairwise_epipoles = torch.zeros([num_cameras, num_cameras, 4], device=M.device)
+
+	essential_matrices, valid_pairs = calculate_pairwise_essential_matrices(M, Ns)
+	_, _, Vt_E = torch.linalg.svd(essential_matrices)
+	_, _, Vt_ET = torch.linalg.svd(essential_matrices.transpose(1, 2))
+
+	e_i, e_j = Vt_ET[:, -1, :] / Vt_ET[:, -1, -1:], Vt_E[:, -1, :] / Vt_E[:, -1, -1:]
+	pairwise_epipoles[valid_pairs[:, 0], valid_pairs[:, 1], :] = torch.cat([e_i[:, :2], e_j[:, :2]], dim=1)
+	pairwise_epipoles[valid_pairs[:, 1], valid_pairs[:, 0], :] = torch.cat([e_j[:, :2], e_i[:, :2]], dim=1)
+
+	return pairwise_epipoles
+
+def compute_pairwise_epipoles_from_Rt(Rs, ts):
+	"""
+	Vectorized computation of pairwise epipoles for all camera pairs using their R, t.
+	Args:
+		Rs: [N, 3, 3] rotation matrices (world-to-camera)
+		ts: [N, 3] translation vectors (world-to-camera)
+	Returns:
+		pairwise_epipoles: [N, N, 4] tensor, where [:, :, :2] is e_ij in i, [:, :, 2:] is e_ji in j
+	"""
+	N = Rs.shape[0]
+	device = Rs.device if torch.is_tensor(Rs) else 'cpu'
+	dtype = Rs.dtype if torch.is_tensor(Rs) else torch.float32
+
+	# Compute camera centers in world coordinates: C = -R^T t
+	Rs_T = Rs.transpose(1, 2)  # [N, 3, 3]
+	Cs = -torch.bmm(Rs_T, ts.unsqueeze(-1)).squeeze(-1)  # [N, 3]
+
+	# Expand for all pairs
+	Ci = Cs.unsqueeze(1).expand(N, N, 3)  # [N, N, 3]
+	Cj = Cs.unsqueeze(0).expand(N, N, 3)  # [N, N, 3]
+	Ri = Rs.unsqueeze(1).expand(N, N, 3, 3)  # [N, N, 3, 3]
+	Rj = Rs.unsqueeze(0).expand(N, N, 3, 3)  # [N, N, 3, 3]
+
+	# Epipole in image i: projection of Cj into i
+	e_ij_h = torch.matmul(Ri, (Cj - Ci).unsqueeze(-1)).squeeze(-1)  # [N, N, 3]
+	e_ij = e_ij_h[..., :2] / (e_ij_h[..., 2:3] + 1e-8)  # [N, N, 2]
+
+	# Epipole in image j: projection of Ci into j
+	e_ji_h = torch.matmul(Rj, (Ci - Cj).unsqueeze(-1)).squeeze(-1)  # [N, N, 3]
+	e_ji = e_ji_h[..., :2] / (e_ji_h[..., 2:3] + 1e-8)  # [N, N, 2]
+
+	# Stack to [N, N, 4]
+	pairwise_epipoles = torch.cat([e_ij, e_ji], dim=-1)  # [N, N, 4]
+
+	# Optionally, set diagonal to zero (epipole of a camera wrt itself is undefined)
+	pairwise_epipoles[torch.arange(N), torch.arange(N)] = 0
+
+	return pairwise_epipoles
