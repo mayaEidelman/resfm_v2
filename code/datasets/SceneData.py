@@ -7,11 +7,8 @@ import numpy as np
 import warnings
 
 
-
-
-
 class SceneData:
-    def __init__(self, M, Ns, Ps_gt, scan_name, dilute_M=False, outliers=None, dict_info=None, nameslist=None, M_original=None):
+    def __init__(self, M, Ns, Ps_gt, scan_name, dilute_M=False, outliers=None, dict_info=None, nameslist=None, M_original=None, pairwise_epipoles=None):
 
         if M_original is None:
             M_original = M.detach().clone()
@@ -30,6 +27,9 @@ class SceneData:
         self.M_original = M_original
         self.Ns = Ns
         self.outlier_indices = outliers
+
+        # Calculate and store pairwise epipoles
+        self.pairwise_epipoles = geo_utils.compute_pairwise_epipoles(M, Ns) if pairwise_epipoles is None else pairwise_epipoles
 
         # M to sparse matrix
         self.x = dataset_utils.M2sparse(M, normalize=True, Ns=Ns, M_original=M_original)
@@ -101,9 +101,9 @@ def sample_data(data, num_samples, adjacent=True):
 
     M = M[:, (M > 0).sum(dim=0) > 2]
 
+    pairwise_epipoles = data.pairwise_epipoles[indices][:, indices]
 
-
-    sampled_data = SceneData(M, Ns, y, data.scan_name,outliers=outlier_indices, nameslist=data.img_list[indices])
+    sampled_data = SceneData(M, Ns, y, data.scan_name,outliers=outlier_indices, nameslist=data.img_list[indices], pairwise_epipoles=pairwise_epipoles)
     if (sampled_data.x.pts_per_cam == 0).any():
         warnings.warn('Cameras with no points for dataset '+ data.scan_name)
 

@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-import dataset_utils
+from utils import dataset_utils
 from models.baseNet import BaseNet
 from models.layers import *
 from utils.sparse_utils import SparseMat
@@ -59,7 +59,8 @@ class SetOfSetOutliersNet(BaseNet):
         for i in range(num_blocks - 1):
             self.equivariant_blocks.append(SetOfSetBlock(num_feats, num_feats, conf))
 
-        self.m_net = get_linear_layers([num_feats] * 2 + [m_d_out], final_layer=True, batchnorm=False)
+        self.pairwise_mlp = get_linear_layers([4, 64, num_feats], final_layer=True, batchnorm=False)
+        self.m_net = get_linear_layers([num_feats * 2] * 2 + [m_d_out], final_layer=True, batchnorm=False)
         self.n_net = get_linear_layers([num_feats] * 2 + [n_d_out], final_layer=True, batchnorm=False)
         self.outlier_net = get_linear_layers([num_feats] * 2 + [1], final_layer=True, batchnorm=False)
         if phase is Phases.FINE_TUNE:
@@ -90,16 +91,20 @@ class SetOfSetOutliersNet(BaseNet):
 
         if self.mode != 1:
             # outliers predictions
-
             outliers_out = self.outlier_net(x.values)
             outliers_out = torch.sigmoid(outliers_out)
         else:
             outliers_out = None
 
         if self.mode != 2:
-
             # Cameras predictions
             m_input = x.mean(dim=1) # [m,d_out]
+            
+            # Process pairwise epipoles
+            pairwise_features = self.pairwise_mlp(data.pairwise_epipoles).mean(dim=1)
+
+            # Concatenate with existing camera features
+            m_input = torch.cat([m_input, pairwise_features], dim=1)
             m_out = self.m_net(m_input)  # [m, d_m]
 
             # Points predictions

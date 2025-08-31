@@ -9,9 +9,9 @@ import torch
 import os
 import sys
 
-from dataset_utils import get_M_valid_points
+from utils.dataset_utils import get_M_valid_points
 from utils.Phases import Phases
-from path_utils import path_to_outliers
+from utils.path_utils import path_to_outliers
 from utils import geo_utils, general_utils, dataset_utils, path_utils, plot_utils
 import scipy.io as sio
 import numpy as np

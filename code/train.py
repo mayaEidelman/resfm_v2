@@ -3,12 +3,12 @@ import sys
 import torch
 import math
 # import time
-import general_utils
+from utils import general_utils
 import loss_functions
 import evaluation
 import copy
 
-from general_utils import save_metrics_excel
+from utils.general_utils import save_metrics_excel
 from utils import path_utils, dataset_utils, plot_utils
 from utils.metrics_utils import OutliersMetrics, CalcMeanBatchMetrics, nanMetrics
 from time import time
@@ -236,7 +236,7 @@ def train(conf, train_data, model, phase, validation_data=None, test_data=None, 
                 train_metrics_means = CalcMeanBatchMetrics(train_metrics, phase)
                 wandb.log(train_metrics_means, step=epoch)
             if epoch % 100 == 0:
-                print(f'{fabric.global_rank}:{epoch} Train Loss: {mean_train_loss}')
+                print(f'{fabric.global_rank}:{epoch} Train Loss: {mean_train_loss}, time: {time() - begin_time}')
 
 
         # === Evaluation ===
