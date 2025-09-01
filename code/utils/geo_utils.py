@@ -6,6 +6,7 @@ from numpy.random._mt19937 import MT19937
 from numpy.random import Generator
 from utils import dataset_utils
 import dask.array as da
+from itertools import combinations
 
 
 def compare_rotationsError(R1, R2):
@@ -499,4 +500,51 @@ def remove_empty_tracks_cams(M, Ps=None, Ns=None, outliers=None, Xs=None, data=N
 	camValidIndices = pts_per_cam >= pts_per_cam_thresh
 	pts3DValidIndices = cam_per_pts >= cam_per_pts_thresh
 	return M, Ps, Ns, outliers, Xs, camValidIndices, pts3DValidIndices
+
+########################## COMPUTE PAIRWISE EPIPOLES ##########################
+def calculate_pairwise_essential_matrices(M, Ns):
+	num_cameras = Ns.shape[0]
+
+	visibility_mask = M.view(num_cameras, 2, -1)[:, 0, :] != 0
+	norm_M = normalize_M(M, Ns).view(num_cameras, -1, 2)
+
+	essential_matrices = []
+	valid_pairs_indices = []
+
+	for i, j in combinations(range(num_cameras), 2):
+		common_mask = visibility_mask[i] & visibility_mask[j]
+
+		if common_mask.sum() < 8:
+			continue
+
+		pts_i, pts_j = norm_M[i, common_mask, :].cpu().numpy(), norm_M[j, common_mask, :].cpu().numpy()
+
+		E, _ = cv2.findEssentialMat(
+			pts_i, pts_j, cameraMatrix=np.eye(3), method=cv2.RANSAC, prob=0.9, threshold=0.1
+		)
+
+		if E is not None:
+			essential_matrices.append(torch.from_numpy(E).float())
+			valid_pairs_indices.append(torch.tensor([i, j]))
+
+	essential_matrices = torch.stack(essential_matrices).to(M.device)
+	valid_pairs = torch.stack(valid_pairs_indices)
+
+	return essential_matrices, valid_pairs
+
+
+def compute_pairwise_epipoles(M, Ns):
+
+	num_cameras = Ns.shape[0]
+	pairwise_epipoles = torch.zeros([num_cameras, num_cameras, 4], device=M.device)
+
+	essential_matrices, valid_pairs = calculate_pairwise_essential_matrices(M, Ns)
+	_, _, Vt_E = torch.linalg.svd(essential_matrices)
+	_, _, Vt_ET = torch.linalg.svd(essential_matrices.transpose(1, 2))
+
+	e_i, e_j = Vt_ET[:, -1, :] / Vt_ET[:, -1, -1:], Vt_E[:, -1, :] / Vt_E[:, -1, -1:]
+	pairwise_epipoles[valid_pairs[:, 0], valid_pairs[:, 1], :] = torch.cat([e_i[:, :2], e_j[:, :2]], dim=1)
+	pairwise_epipoles[valid_pairs[:, 1], valid_pairs[:, 0], :] = torch.cat([e_j[:, :2], e_i[:, :2]], dim=1)
+
+	return pairwise_epipoles
 

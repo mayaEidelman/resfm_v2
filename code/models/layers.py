@@ -43,7 +43,7 @@ def get_linear_layers(feats, init_activation=False, final_activation=False, norm
 
     return Sequential(*layers)
 
-def get_linear_layers_for_outliers(feats, final_layer=False, batchnorm=True):
+def get_linear_layers_for_og(feats, final_layer=False, batchnorm=True):
     layers = []
 
     # Add layers

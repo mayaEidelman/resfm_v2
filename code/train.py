@@ -226,7 +226,7 @@ def train(conf, train_data, model, phase, validation_data=None, test_data=None, 
     begin_time = time()
 
     # === Training Loop ===
-    print(f'Started training with epoch number: {num_of_epochs}, phase: {phase}, output mode: {OUTPUT_MODES_TYPES[conf.get_int("model.output_mode", default=3)]}, data length: {len(train_data)}')
+    print(f'Started training with epoch number: {num_of_epochs}, phase: {phase}, output mode: {OUTPUT_MODES_TYPES[conf.get_int("model.output_mode", default=3)]}, data length: {len(train_data)}, embed_pairwise: {conf.get_bool("model.embed_pairwise")}')
 
     for epoch in range(conf["resuming_epoch"] + 1, num_of_epochs):
         ba_during_training = not conf.get_bool('ba.only_last_eval') and conf.get_bool('ba.run_ba', default=True)

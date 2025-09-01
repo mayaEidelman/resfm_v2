@@ -28,6 +28,7 @@ def main():
     optimization_num_of_epochs = conf.get_int("train.optimization_num_of_epochs")
     optimization_eval_intervals = conf.get_int('train.optimization_eval_intervals')
     optimization_lr = conf.get_float('train.optimization_lr')
+    compute_pairwise = conf.get_bool('dataset.compute_pairwise')
 
     if phase is not Phases.FINE_TUNE:
         # Train model
@@ -36,13 +37,13 @@ def main():
         print(f'Number of trainable parameters:: {sum(p.numel() for p in model.parameters() if p.requires_grad)}')
 
         # Create train, test and validation sets
-        test_scenes = SceneData.create_scene_data_from_list(conf.get_list('dataset.test_set'), conf)
-        validation_scenes = SceneData.create_scene_data_from_list(conf.get_list('dataset.validation_set'), conf)
-        train_scenes = SceneData.create_scene_data_from_list(conf.get_list('dataset.train_set'), conf)
+        test_scenes = SceneData.create_scene_data_from_list(conf.get_list('dataset.test_set'), conf, compute_pairwise=compute_pairwise)
+        validation_scenes = SceneData.create_scene_data_from_list(conf.get_list('dataset.validation_set'), conf, compute_pairwise=compute_pairwise)
+        train_scenes = SceneData.create_scene_data_from_list(conf.get_list('dataset.train_set'), conf, compute_pairwise=compute_pairwise)
 
-        train_set = ScenesDataSet(train_scenes, return_all=False, min_sample_size=min_sample_size, max_sample_size=max_sample_size, phase=Phases.TRAINING)
-        validation_set = ScenesDataSet(validation_scenes, return_all=True)
-        test_set = ScenesDataSet(test_scenes, return_all=True)
+        train_set = ScenesDataSet(train_scenes, return_all=False, min_sample_size=min_sample_size, max_sample_size=max_sample_size, phase=Phases.TRAINING, compute_pairwise=compute_pairwise)
+        validation_set = ScenesDataSet(validation_scenes, return_all=True, compute_pairwise=False)
+        test_set = ScenesDataSet(test_scenes, return_all=True, compute_pairwise=False) # TODO: check if compute_pairwise is needed also in test set
 
         # Create dataloaders
         train_loader = torch.utils.data.DataLoader(train_set, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)

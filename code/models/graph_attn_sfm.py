@@ -9,8 +9,10 @@ class GraphAttnSfMNet(BaseNet):
     def __init__(self, conf, batchnorm=False, phase=None):
         super(GraphAttnSfMNet, self).__init__(conf)
         # n is the number of points and m is the number of cameras
+        self.embed_pairwise = conf.get_bool("model.embed_pairwise")
         num_layers = conf.get_int('model.num_layers')
         num_feats = conf.get_int('model.num_features')
+        self.num_feats = num_feats
         n_heads = conf.get_int("model.n_heads")
         n_feat_proj = conf.get_int('model.n_feat_proj')
         n_feat_scenepoint = conf.get_int('model.n_feat_scenepoint')
@@ -40,6 +42,8 @@ class GraphAttnSfMNet(BaseNet):
             n_hidden_layers_view_head = conf.get_int('model.view_head.n_hidden_layers')
         if self.scenepoint_head_enabled:
             n_hidden_layers_scenepoint_head = conf.get_int('model.scenepoint_head.n_hidden_layers')
+        if self.embed_pairwise:
+            self.pairwise_mlp = get_linear_layers_for_og([4, 64, num_feats], final_layer=True, batchnorm=False)
 
 
         self.batchnorm = batchnorm
@@ -62,7 +66,7 @@ class GraphAttnSfMNet(BaseNet):
 
         # Match outlier MLP input to the final projection feature dimension
         outlier_in_dim = n_feat_proj_depth_head if self.depth_head_enabled else n_feat_proj
-        self.outlier_net = get_linear_layers_for_outliers([outlier_in_dim, num_feats, num_feats, 1], final_layer=True, batchnorm=True)
+        self.outlier_net = get_linear_layers_for_og([outlier_in_dim, num_feats, num_feats, 1], final_layer=True, batchnorm=True)
         if phase is Phases.FINE_TUNE:
             self.mode = 1
         else:
@@ -115,10 +119,15 @@ class GraphAttnSfMNet(BaseNet):
             )
         # if self.batchnorm:
         #     raise NotImplementedError()
+        
         if self.depth_head_enabled:
             self.depth_head = get_linear_layers((1 + n_hidden_layers_depth_head) * [n_feat_proj_depth_head] + [depth_d_out], init_activation=False, final_activation=False, norm=False)
         if self.view_head_enabled:
-            self.view_head = get_linear_layers((1 + n_hidden_layers_view_head) * [n_feat_view] + [view_d_out], init_activation=False, final_activation=False, norm=False)
+            # When embedding pairwise features, we concatenate them to m_input in forward().
+            # Set the input width accordingly and keep hidden width at n_feat_view.
+            view_head_in = n_feat_view + (num_feats if self.embed_pairwise else 0)
+            print(f"view_head_in: {view_head_in}, n_feat_view: {n_feat_view}, num_feats: {num_feats}, !!!!!!!!!!!!!!!!!!")
+            self.view_head = get_linear_layers([view_head_in] + [n_feat_view] * n_hidden_layers_view_head + [view_d_out], init_activation=False, final_activation=False, norm=False)
             # self.view_head = get_linear_layers([n_feat_view] * 2 + [view_d_out], init_activation=False, final_activation=False, norm=False)
         if self.scenepoint_head_enabled:
             self.scenepoint_head = get_linear_layers((1 + n_hidden_layers_scenepoint_head) * [n_feat_scenepoint] + [scenepoint_d_out], init_activation=False, final_activation=False, norm=False)
@@ -170,6 +179,9 @@ class GraphAttnSfMNet(BaseNet):
                 projection_features.pts_per_cam,
                 [n_views, n_scenepoints, 1],
             )
+        if self.embed_pairwise:
+            pairwise_features = self.pairwise_mlp(data.pairwise_epipoles).mean(dim=1)
+            m_input = torch.cat([m_input, pairwise_features], dim=1)
 
         if self.view_head_enabled:
             # Cameras predictions

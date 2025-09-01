@@ -14,7 +14,7 @@ import warnings
 
 
 class SceneData:
-    def __init__(self,M, Ns,Ps_gt, scene_name, calibrated = False, store_depth_targets = False, depths = None, dilute_M=False, outliers=None, dict_info=None, nameslist=None, M_original=None
+    def __init__(self,M, Ns,Ps_gt, scene_name, calibrated = False, store_depth_targets = False, depths = None, dilute_M=False, outliers=None, dict_info=None, nameslist=None, M_original=None, pairwise_epipoles=None, compute_pairwise=True
     ):
         """
         If calibrated = True, then N = inv(K), and the camera matrices, as they are normalized with N, are calibrated.
@@ -40,6 +40,13 @@ class SceneData:
         self.Ns = Ns
         self.outlier_indices = outliers
         self.dict_info = dict_info
+
+        # Calculate and store pairwise epipoles
+        if compute_pairwise:
+            self.pairwise_epipoles = geo_utils.compute_pairwise_epipoles(M, Ns) if pairwise_epipoles is None else pairwise_epipoles
+        else:
+            self.pairwise_epipoles = None
+
 
         # M to sparse matrix
         self.x = dataset_utils.M2sparse(self.M, normalize=True, Ns=self.Ns, M_original=M_original)
@@ -78,21 +85,6 @@ class SceneData:
                     self.M.numpy(),
                     Ns = K_inv.numpy(),
                 ), dtype=torch.float32)
-                # X, V_H = geo_utils.n_view_triangulation(
-                #     self.y.numpy(),
-                #     self.M.numpy(),
-                #     Ns = K_inv.numpy(),
-                #     return_V_H = True,
-                # )
-                # X = torch.tensor(X, dtype=torch.float32)
-                # S_diag, V_H = zip(*[ (torch.tensor(S_diag, dtype=torch.float32), torch.tensor(curr_V_H, dtype=torch.float32)) for S_diag, curr_V_H in V_H ])
-
-                # # Calculate reprojection error for the triangulation
-                # projected_points = (self.y @ X).swapaxes(1, 2)
-                # projected_points = projected_points[:, :, :2] / projected_points[:, :, [2]]
-                # reprojerr = torch.mean(torch.norm(projected_points[valid_pts_idx[0], valid_pts_idx[1]] - geo_utils.M_to_xs(self._M)[valid_pts_idx[0], valid_pts_idx[1]], dim=1))
-                # print(reprojerr) # DrinkingFountainSomewhereInZurich (Euclidean): 0.3211 px
-                # assert False
 
                 # Verify certain assumptions required for the depth calculation below
                 valid_scenepoint_mask = torch.any(self.valid_pts, dim=0) # Determine which points are visible in enough cameras
@@ -108,33 +100,6 @@ class SceneData:
                 #       Instead, we perform the normalization when computing the loss.
             assert self.depths.shape == (n_images, self.M.shape[1])
             assert torch.all(torch.isfinite(self.depths[valid_pts_idx[0], valid_pts_idx[1]]))
-            # # NOTE: Negative depths encountered for AlcatrazCourtyard:
-            # print(scene_name)
-            # print(self.depths.shape)
-            # print(torch.min(self.depths[valid_pts_idx[0], valid_pts_idx[1]]))
-            # print(torch.max(self.depths[valid_pts_idx[0], valid_pts_idx[1]]))
-            # print(torch.mean(self.depths[valid_pts_idx[0], valid_pts_idx[1]]))
-            # print(torch.sum(self.depths[valid_pts_idx[0], valid_pts_idx[1]] <= 0))
-            # print(torch.sum(self.depths[valid_pts_idx[0], valid_pts_idx[1]] < 0))
-            # neg_depth_mask = (self.depths <= 0) & self.valid_pts
-            # neg_depth_idx = nonzero_safe(neg_depth_mask) # 2-tuple, elements with shape (n_neg,)
-            # print(neg_depth_idx)
-            # print(geo_utils.M_to_xs(self.M)[neg_depth_idx[0], neg_depth_idx[1]])
-            # resid = ((self.y @ X)[:, :2, :] / (self.y @ X)[:, [2], :]).swapaxes(1, 2)[neg_depth_idx[0], neg_depth_idx[1]] - geo_utils.M_to_xs(self.M)[neg_depth_idx[0], neg_depth_idx[1]]
-            # print(resid)
-            # print(torch.norm(resid, dim=1, keepdim=True))
-            # neg_depth_scenepoint_idx = torch.unique(neg_depth_idx[1])
-            # print(neg_depth_scenepoint_idx)
-            # print(torch.sum(self.valid_pts[:, neg_depth_scenepoint_idx], dim=0))
-            # print(self.depths[neg_depth_idx[0], neg_depth_idx[1]])
-            # # print(self.depths[neg_depth_idx[0], neg_depth_idx[1]][:, None] * (K_inv @ torch.cat([geo_utils.M_to_xs(self.M), torch.ones((self.M.shape[0]//2, 1, 1))]).swapaxes(1, 2)).swapaxes(1, 2)[neg_depth_idx[0], neg_depth_idx[1]])
-            # # print((K_inv @ self.y @ X).swapaxes(1, 2)[neg_depth_idx[0], neg_depth_idx[1]])
-            # print(V_H[22539][-1, :])
-            # print(S_diag[22539])
-            # print(S_diag[1000])
-            # # print(V_H)
-            # import pdb
-            # pdb.set_trace()
             assert torch.all(self.depths[valid_pts_idx[0], valid_pts_idx[1]] > 0)
         else:
             self.depths = None
@@ -193,49 +158,6 @@ class SceneData:
             valid_scenepoint_indices = torch.from_numpy(np.array(np.nonzero(valid_scenepoint_mask.numpy())))
         graph_wrapper_scenepoint2global = dataset_utils.AxialAggregationGraphWrapper(1, n, 1, valid_indices=valid_scenepoint_indices, device=device)
 
-        # ######################################################################################
-        # # VERIFICATION OF RESULTING GRAPH CONNECTIVITY #######################################
-        # ######################################################################################
-
-        # M = self.norm_M.reshape(m, 2, n).permute(0, 2, 1) # (2*m, n) -> (m, 2, n) -> (m, n, 2)
-
-        # n_valid = valid_indices.shape[1]
-
-        # # x_proj2view = graph_wrapper_proj2view.graph.x
-        # x_proj2view = graph_wrapper_proj2view.generate_node_features(x)
-        # # x_proj2scenepoint = graph_wrapper_proj2scenepoint.graph.x
-        # x_proj2scenepoint = graph_wrapper_proj2scenepoint.generate_node_features(x)
-
-        # for view_idx in range(m):
-        #     curr_row_mask = valid_indices[0, :] == view_idx
-        #     assert curr_row_mask.shape == (n_valid,)
-
-        #     curr_valid_alt1 = M[valid_indices[0, curr_row_mask], valid_indices[1, curr_row_mask], :]
-        #     print(curr_valid_alt1.shape, x_proj2view[:n_valid, :][curr_row_mask, :].shape)
-        #     assert torch.all(curr_valid_alt1 == x_proj2view[:n_valid, :][curr_row_mask, :])
-
-        #     # Alternative:
-        #     curr_valid_alt2 = M[view_idx, valid_indices[1, curr_row_mask], :]
-        #     # print(curr_valid_alt2.shape, x_proj2view[:n_valid, :][curr_row_mask, :].shape)
-        #     assert torch.all(curr_valid_alt2 == x_proj2view[:n_valid, :][curr_row_mask, :])
-
-        # for scenepoint_idx in range(n):
-        #     curr_col_mask = valid_indices[1, :] == scenepoint_idx
-        #     assert curr_col_mask.shape == (n_valid,)
-
-        #     curr_valid_alt1 = M[valid_indices[0, curr_col_mask], valid_indices[1, curr_col_mask], :]
-        #     # print(curr_valid_alt1.shape, x_proj2scenepoint[:n_valid, :][curr_col_mask, :].shape)
-        #     assert torch.all(curr_valid_alt1 == x_proj2scenepoint[:n_valid, :][curr_col_mask, :])
-
-        #     # Alternative:
-        #     curr_valid_alt2 = M[valid_indices[0, curr_col_mask], scenepoint_idx, :]
-        #     # print(curr_valid_alt2.shape, x_proj2scenepoint[:n_valid, :][curr_col_mask, :].shape)
-        #     assert torch.all(curr_valid_alt2 == x_proj2scenepoint[:n_valid, :][curr_col_mask, :])
-
-        # assert False
-        # ######################################################################################
-        # ######################################################################################
-
         graph_wrappers = {
             'proj2view': graph_wrapper_proj2view,
             'proj2scenepoint': graph_wrapper_proj2scenepoint,
@@ -292,7 +214,8 @@ def create_scene_data(
     scene = None,
     calibrated = None,
     use_gt = None,
-    phase=None
+    phase=None,
+    compute_pairwise=True
 ):
     store_depth_targets = conf.get_bool('model.depth_head.enabled', default=False)
 
@@ -307,14 +230,6 @@ def create_scene_data(
     else:
         M, Ns, Ps_gt = Projective.get_raw_data(conf, scene, use_gt)
 
-    # if scene in [
-    #     'PantheonParis', # NOTE: Some points are visible in 0 views and will be pruned. All other points are visible in 2+ views.
-    # ]:
-    #     # Point filtering, discarding points that are not visible in at least MIN_N_VIEWS_PER_POINT views.
-    #     M_valid_pts_mask = dataset_utils.get_M_valid_points(M)
-    #     points_mask = M_valid_pts_mask.any(dim=0) # M_valid_pts_mask is False for the entire column of such points, so we just need to check for which columns of the mask there are True entries.
-    #     M = M[:, nonzero_safe(points_mask)[0]]
-
     scene_data = SceneData(
         M,
         Ns,
@@ -326,13 +241,14 @@ def create_scene_data(
         outliers=outliers, 
         dict_info=dict_info, 
         nameslist=namesList,
-        M_original=M_original
+        M_original=M_original,
+        compute_pairwise=compute_pairwise
     )
     # assert dataset_utils.is_valid_sample(scene_data)
     return scene_data
 
 
-def sample_data(data, num_samples, adjacent=True):
+def sample_data(data, num_samples, adjacent=True, compute_pairwise=True):
     """For a given scene, randomly sample num_samples cameras (rows), adjacent or not.
     Note: when the requested num_samples is more than available cameras, all cameras will be returned"""
 
@@ -356,20 +272,10 @@ def sample_data(data, num_samples, adjacent=True):
     if data.store_depth_targets:
         depths = depths[indices, :]
 
-    # Additional point filtering, discarding points that are not visible in at least MIN_N_VIEWS_PER_POINT views:
-    # M_valid_pts_mask = dataset_utils.get_M_valid_points(M)
-    # points_mask = M_valid_pts_mask.any(dim=0) # M_valid_pts_mask is False for the entire column of such points, so we just need to check for which columns of the mask there are True entries.
-    # if M.is_cuda:
-    #     M = M[:, points_mask]
-    #     if data.store_depth_targets:
-    #         depths = depths[:, points_mask]
-    # else:
-    #     # NOTE: Workaround for bug in nonzero_out_cpu(), internally called by pytorch during advanced indexing operation.
-    #     idx = np.nonzero(points_mask.numpy())[0]
-    #     assert len(idx.shape) == 1, 'Expected 1D-array, but encountered idx.shape == {}'.format(idx.shape)
-    #     M = M[:, torch.from_numpy(idx)]
-    #     if data.store_depth_targets:
-    #         depths = depths[:, torch.from_numpy(idx)]
+    if compute_pairwise:
+        pairwise_epipoles = data.pairwise_epipoles[indices][:, indices]
+    else:
+        pairwise_epipoles = None
 
     sampled_data = SceneData(
         M,
@@ -380,18 +286,20 @@ def sample_data(data, num_samples, adjacent=True):
         store_depth_targets = data.store_depth_targets,
         depths = depths,
         outliers=outlier_indices, 
-        nameslist=data.img_list[indices]
+        nameslist=data.img_list[indices], 
+        pairwise_epipoles=pairwise_epipoles,
+        compute_pairwise=compute_pairwise
     )
     if (sampled_data.x.pts_per_cam == 0).any():
         warnings.warn('Cameras with no points for dataset '+ data.scene_name)
 
     return sampled_data
 
-def create_scene_data_from_list(scene_names_list, conf):
+def create_scene_data_from_list(scene_names_list, conf, compute_pairwise=False):
     data_list = []
     for scene_name in scene_names_list:
         conf["dataset"]["scene"] = scene_name
-        data = create_scene_data(conf, scene=scene_name)
+        data = create_scene_data(conf, scene=scene_name, compute_pairwise=compute_pairwise)
         data_list.append(data)
 
     return data_list
@@ -421,7 +329,7 @@ def test_dataset():
 
     print("Test projective")
     conf = ConfigFactory.from_dict(conf_dict)
-    data = create_scene_data(conf)
+    data = create_scene_data(conf, compute_pairwise=False)
     test_data(data, conf)
 
     print('Test move to device')
@@ -431,13 +339,13 @@ def test_dataset():
     print(os.linesep)
     print("Test Euclidean")
     conf = ConfigFactory.from_dict(conf_dict) # This conf reset may no longer be necessary, but let's keep it in case we have overlooked some modification of conf inside any of the called functions.
-    data = create_scene_data(conf, calibrated=True)
+    data = create_scene_data(conf, calibrated=True, compute_pairwise=False)
     test_data(data, conf)
 
     print(os.linesep)
     print("Test use_gt GT")
     conf = ConfigFactory.from_dict(conf_dict) # This conf reset may no longer be necessary, but let's keep it in case we have overlooked some modification of conf inside any of the called functions.
-    data = create_scene_data(conf, use_gt=True)
+    data = create_scene_data(conf, use_gt=True, compute_pairwise=False)
     test_data(data, conf)
 
 
