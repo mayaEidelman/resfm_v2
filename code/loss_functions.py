@@ -140,11 +140,11 @@ class PairwiseConsistencyLoss(nn.Module):
         self.pairwise_pose_weight = conf.get_float("loss.pairwise_pose_weight", default=1.0)
         self.calibrated = conf.get_bool('dataset.calibrated')
 
-    def forward1(self, pred_cam, data, epoch=None):
+    def forward(self, pred_cam, data, epoch=None):
         pairwise_epipole_loss = pairwise_utils.pairwise_epipole_loss(data, pred_cam)
         return pairwise_epipole_loss
 
-    def forward(self, pred_cam, data, epoch=None):
+    def forward1(self, pred_cam, data, epoch=None):
         Ps_pred = pred_cam["Ps_norm"]
 
         Rs_pred, ts_pred = geo_utils.decompose_camera_matrix(Ps_pred)
