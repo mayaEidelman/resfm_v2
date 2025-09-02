@@ -126,7 +126,6 @@ class GraphAttnSfMNet(BaseNet):
             # When embedding pairwise features, we concatenate them to m_input in forward().
             # Set the input width accordingly and keep hidden width at n_feat_view.
             view_head_in = n_feat_view + (num_feats if self.embed_pairwise else 0)
-            print(f"view_head_in: {view_head_in}, n_feat_view: {n_feat_view}, num_feats: {num_feats}, !!!!!!!!!!!!!!!!!!")
             self.view_head = get_linear_layers([view_head_in] + [n_feat_view] * n_hidden_layers_view_head + [view_d_out], init_activation=False, final_activation=False, norm=False)
             # self.view_head = get_linear_layers([n_feat_view] * 2 + [view_d_out], init_activation=False, final_activation=False, norm=False)
         if self.scenepoint_head_enabled:

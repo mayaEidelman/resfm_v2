@@ -548,3 +548,42 @@ def compute_pairwise_epipoles(M, Ns):
 
 	return pairwise_epipoles
 
+def compute_pairwise_epipoles_from_Rt(Rs, ts):
+	"""
+	Vectorized computation of pairwise epipoles for all camera pairs using their R, t.
+	Args:
+		Rs: [N, 3, 3] rotation matrices (world-to-camera)
+		ts: [N, 3] translation vectors (world-to-camera)
+	Returns:
+		pairwise_epipoles: [N, N, 4] tensor, where [:, :, :2] is e_ij in i, [:, :, 2:] is e_ji in j
+	"""
+	N = Rs.shape[0]
+	device = Rs.device if torch.is_tensor(Rs) else 'cpu'
+	dtype = Rs.dtype if torch.is_tensor(Rs) else torch.float32
+
+	# Compute camera centers in world coordinates: C = -R^T t
+	Rs_T = Rs.transpose(1, 2)  # [N, 3, 3]
+	Cs = -torch.bmm(Rs_T, ts.unsqueeze(-1)).squeeze(-1)  # [N, 3]
+
+	# Expand for all pairs
+	Ci = Cs.unsqueeze(1).expand(N, N, 3)  # [N, N, 3]
+	Cj = Cs.unsqueeze(0).expand(N, N, 3)  # [N, N, 3]
+	Ri = Rs.unsqueeze(1).expand(N, N, 3, 3)  # [N, N, 3, 3]
+	Rj = Rs.unsqueeze(0).expand(N, N, 3, 3)  # [N, N, 3, 3]
+
+	# Epipole in image i: projection of Cj into i
+	e_ij_h = torch.matmul(Ri, (Cj - Ci).unsqueeze(-1)).squeeze(-1)  # [N, N, 3]
+	e_ij = e_ij_h[..., :2] / (e_ij_h[..., 2:3] + 1e-8)  # [N, N, 2]
+
+	# Epipole in image j: projection of Ci into j
+	e_ji_h = torch.matmul(Rj, (Ci - Cj).unsqueeze(-1)).squeeze(-1)  # [N, N, 3]
+	e_ji = e_ji_h[..., :2] / (e_ji_h[..., 2:3] + 1e-8)  # [N, N, 2]
+
+	# Stack to [N, N, 4]
+	pairwise_epipoles = torch.cat([e_ij, e_ji], dim=-1)  # [N, N, 4]
+
+	# Optionally, set diagonal to zero (epipole of a camera wrt itself is undefined)
+	pairwise_epipoles[torch.arange(N), torch.arange(N)] = 0
+
+	return pairwise_epipoles
+

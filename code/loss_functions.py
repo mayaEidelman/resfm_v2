@@ -2,8 +2,8 @@ import torch
 from utils import geo_utils
 from torch import nn
 from torch.nn import functional as F
-
-
+import traceback
+from utils import pairwise_utils
 
 class ESFMLoss(nn.Module):
     def __init__(self, conf):
@@ -91,6 +91,63 @@ class ESFMLoss_weighted(nn.Module):
 
         return weightedLoss.mean()
 
+class PairwiseConsistencyLoss(nn.Module):
+    """
+    Unsupervised pairwise consistency loss that enforces geometric consistency 
+    between predicted camera poses and pairwise matches.
+    """
+    def __init__(self, conf):
+        super().__init__()
+        self.absolute_pose_weight = conf.get_float("loss.absolute_pose_weight", default=0.5)
+        self.pairwise_pose_weight = conf.get_float("loss.pairwise_pose_weight", default=0.5)
+        self.calibrated = conf.get_bool('dataset.calibrated')
+
+    def forward(self, pred_cam, data, epoch=None):
+        Ps_pred = pred_cam["Ps_norm"]
+        Rs_pred, ts_pred = geo_utils.decompose_camera_matrix(Ps_pred)
+        pairwise_epipole_loss = pairwise_utils.pairwise_epipole_loss(data, Rs_pred, ts_pred, Ps_pred.device)
+        return pairwise_epipole_loss
+
+    def forward1(self, pred_cam, data, epoch=None):
+        Ps_pred = pred_cam["Ps_norm"]
+
+        Rs_pred, ts_pred = geo_utils.decompose_camera_matrix(Ps_pred)
+        Ks_invT = getattr(data, 'Ns_invT', None)
+        Ks = Ks_invT.transpose(1, 2) if Ks_invT is not None else None
+        Rs_gt, ts_gt = geo_utils.decompose_camera_matrix(data.y.to(Ps_pred.device), Ks.to(Ps_pred.device) if Ks is not None else None)
+
+        absolute_pose_loss = self.absolut_Rt_loss(Rs_pred, ts_pred, Rs_gt, ts_gt, Ps_pred.device)
+        # pairwise_pose_loss = self.pairwise_Rt_loss(Rs_pred, ts_pred, Rs_gt, ts_gt, Ps_pred.device)
+        pairwise_epipole_loss = pairwise_utils.pairwise_epipole_loss(data, Rs_pred, ts_pred, Ps_pred.device)
+
+        total_loss =  self.absolute_pose_weight * absolute_pose_loss + self.pairwise_pose_weight * pairwise_epipole_loss
+        return total_loss
+
+    def pairwise_Rt_loss(self, Rs_pred, ts_pred, Rs_gt, ts_gt, device=None):
+        pairwise_pose_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        if self.pairwise_pose_weight > 0.0:
+            try:
+                rotation_loss, translation_loss = pairwise_utils.compute_pairwise_pose_consistency(Rs_pred, ts_pred, Rs_gt, ts_gt, device)
+                pairwise_pose_loss = (rotation_loss + translation_loss)/2
+            except Exception as e:
+                print(f"Warning: Failed to compute pairwise pose consistency loss: {e}")
+                traceback.print_exc()
+        
+        return pairwise_pose_loss
+        
+
+    def absolut_Rt_loss(self, Rs_pred, ts_pred, Rs_gt, ts_gt, device):
+        absolute_pose_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        if self.absolute_pose_weight > 0.0:
+            try:
+                rotation_loss, translation_loss = pairwise_utils.compute_absolute_pose_consistency(Rs_pred, ts_pred, Rs_gt, ts_gt, self.calibrated, device)
+                absolute_pose_loss = (rotation_loss + translation_loss)/2
+            except Exception as e:
+                print(f"Warning: Failed to compute absolute pose consistency loss: {e}")
+                traceback.print_exc()
+        
+        return absolute_pose_loss
+
 class GT_Loss_Outliers(nn.Module):
     def __init__(self, conf):
         super().__init__()
@@ -115,7 +172,7 @@ class OutliersLoss(nn.Module):
         return loss
 
 
-class CombinedLoss(nn.Module):
+class CombinedLoss_otliers(nn.Module):
     def __init__(self, conf):
         super().__init__()
         self.outliers_loss = OutliersLoss(conf)
@@ -139,6 +196,39 @@ class CombinedLoss(nn.Module):
 
         # print(self.alpha * ESFMLoss, self.beta * classificationLoss, self.alpha, self.beta)
         loss = self.alpha * ESFMLoss + self.beta * classificationLoss
+
+        return loss
+
+class CombinedLoss(nn.Module):
+    def __init__(self, conf):
+        super().__init__()
+        self.outliers_loss = OutliersLoss(conf)
+        self.weighted_ESFM_loss = ESFMLoss_weighted(conf)
+        self.pairwise_loss = PairwiseConsistencyLoss(conf)
+        self.alpha = conf.get_float('loss.reproj_loss_weight')
+        self.beta = conf.get_float('loss.classification_loss_weight')
+        self.gamma = conf.get_float('loss.pairwise_loss_weight')
+
+
+    def forward(self, pred_cam, pred_outliers, pred_weights_M, data, epoch=None):
+        classificationLoss = torch.tensor([0], device=pred_outliers.device)
+        ESFMLoss = torch.tensor([0], device=pred_outliers.device)
+        pairwiseLoss = torch.tensor([0], device=pred_outliers.device)
+
+        # Reprojection loss (geometric loss)
+        if self.alpha:
+            ESFMLoss = self.weighted_ESFM_loss(pred_cam, pred_outliers, data)
+
+        # Outlier classification loss
+        if self.beta:
+            classificationLoss = self.outliers_loss(pred_outliers, data)
+
+        # Pairwise loss
+        if self.gamma:
+            pairwiseLoss = self.pairwise_loss(pred_cam, data)
+
+        # print(self.alpha * ESFMLoss, self.beta * classificationLoss, self.alpha, self.beta)
+        loss = self.alpha * ESFMLoss + self.beta * classificationLoss + self.gamma * pairwiseLoss
 
         return loss
 
