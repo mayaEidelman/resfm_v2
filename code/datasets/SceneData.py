@@ -1,18 +1,14 @@
 import torch
-from utils import geo_utils, dataset_utils, sparse_utils
+from utils import geo_utils, dataset_utils, sparse_utils, pairwise_utils
 from datasets import  Euclidean
 import os.path
 from pyhocon import ConfigFactory
 import numpy as np
 import warnings
-
-
-
-
+import traceback
 
 class SceneData:
-    def __init__(self, M, Ns, Ps_gt, scan_name, dilute_M=False, outliers=None, dict_info=None, nameslist=None, M_original=None):
-
+    def __init__(self, M, Ns, Ps_gt, scan_name, dilute_M=False, outliers=None, dict_info=None, nameslist=None, M_original=None, compute_pairwise=True, is_calibrated=True, pairwise_epipoles=None):
         if M_original is None:
             M_original = M.detach().clone()
 
@@ -30,6 +26,11 @@ class SceneData:
         self.M_original = M_original
         self.Ns = Ns
         self.outlier_indices = outliers
+        self.is_calibrated = is_calibrated
+
+        # Calculate and store pairwise epipoles
+        self.pairwise_epipoles = geo_utils.compute_pairwise_epipoles(M, Ns) if pairwise_epipoles is None else pairwise_epipoles
+
 
         # M to sparse matrix
         self.x = dataset_utils.M2sparse(M, normalize=True, Ns=Ns, M_original=M_original)
@@ -40,20 +41,36 @@ class SceneData:
         else:
             self.img_list = nameslist
 
-
-
         # Prepare Ns inverse transpose
         self.Ns_invT = torch.transpose(torch.inverse(Ns), 1, 2)
 
         # Get valid points
         self.valid_pts = dataset_utils.get_M_valid_points(M)
 
+        # Compute pairwise information if requested
+        # if compute_pairwise:
+        #     self._compute_pairwise_data()
+        # print(len(self.matches), len(self.relative_poses))
         # Normalize M
         self.norm_M = geo_utils.normalize_M(M, Ns, self.valid_pts).transpose(1, 2).reshape(n_images * 2, -1)
 
 
         # Stats of the scene
         self.dict_info = dict_info
+
+    def _compute_pairwise_data(self):
+        """Compute pairwise matches and relative poses for this scene."""
+        try:
+            # Determine if cameras are calibrated based on Ns
+            # calibrated = torch.allclose(self.Ns, torch.eye(3, device=self.Ns.device).expand_as(self.Ns), atol=1e-6)
+            # Add pairwise data to scene
+            pairwise_utils.add_pairwise_data_to_scene(self, calibrated=self.is_calibrated )
+        except Exception as e:
+            warnings.warn(f"Failed to compute pairwise data for scene {self.scan_name}: {e}")
+            traceback.print_exc()
+            # Initialize empty dictionaries if computation fails
+            self.matches = {}
+            self.relative_poses = {}
 
 
     def to(self, *args, **kwargs):
@@ -71,6 +88,7 @@ def create_scene_data(conf, phase=None):
     scan = conf.get_string('dataset.scan')
     calibrated = conf.get_bool('dataset.calibrated')
     dilute_M = conf.get_bool('dataset.diluteM', default=False)
+    compute_pairwise = conf.get_bool('dataset.compute_pairwise', default=True)
 
 
     # Get raw data
@@ -79,7 +97,7 @@ def create_scene_data(conf, phase=None):
     else:
         raise ValueError("The code doesn't support the uncalibrated case")
 
-    return SceneData(M, Ns, Ps_gt, scan, dilute_M, outliers=outliers, dict_info=dict_info, nameslist=namesList, M_original=M_original)
+    return SceneData(M, Ns, Ps_gt, scan, dilute_M, outliers=outliers, dict_info=dict_info, nameslist=namesList, M_original=M_original, compute_pairwise=compute_pairwise, is_calibrated=calibrated)
 
 
 def sample_data(data, num_samples, adjacent=True):
@@ -101,9 +119,9 @@ def sample_data(data, num_samples, adjacent=True):
 
     M = M[:, (M > 0).sum(dim=0) > 2]
 
+    pairwise_epipoles = data.pairwise_epipoles[indices][:, indices]
 
-
-    sampled_data = SceneData(M, Ns, y, data.scan_name,outliers=outlier_indices, nameslist=data.img_list[indices])
+    sampled_data = SceneData(M, Ns, y, data.scan_name,outliers=outlier_indices, nameslist=data.img_list[indices], compute_pairwise=True, pairwise_epipoles=pairwise_epipoles)
     if (sampled_data.x.pts_per_cam == 0).any():
         warnings.warn('Cameras with no points for dataset '+ data.scan_name)
 

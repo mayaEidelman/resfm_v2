@@ -3,12 +3,12 @@ import sys
 import torch
 import math
 # import time
-import general_utils
+import utils.general_utils as general_utils
 import loss_functions
 import evaluation
 import copy
 
-from general_utils import save_metrics_excel
+from utils.general_utils import save_metrics_excel
 from utils import path_utils, dataset_utils, plot_utils
 from utils.metrics_utils import OutliersMetrics, CalcMeanBatchMetrics, nanMetrics
 from time import time
@@ -163,6 +163,7 @@ def train(conf, train_data, model, phase, validation_data=None, test_data=None, 
         loss_name = conf.get_string('loss.func')
     # Get loss function from the loss_functions module
     loss_func = getattr(loss_functions, loss_name)(conf)
+    print(f'Training with loss function  of type {type(loss_func)}')
 
 
     # === Optimizer & Scheduler ===
@@ -236,7 +237,7 @@ def train(conf, train_data, model, phase, validation_data=None, test_data=None, 
                 train_metrics_means = CalcMeanBatchMetrics(train_metrics, phase)
                 wandb.log(train_metrics_means, step=epoch)
             if epoch % 100 == 0:
-                print(f'{fabric.global_rank}:{epoch} Train Loss: {mean_train_loss}')
+                print(f'{fabric.global_rank}:{epoch} Train Loss: {mean_train_loss}, time: {time() - begin_time}')
 
 
         # === Evaluation ===

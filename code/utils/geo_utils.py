@@ -6,6 +6,8 @@ from numpy.random._mt19937 import MT19937
 from numpy.random import Generator
 from utils import dataset_utils
 import dask.array as da
+from itertools import combinations
+# from kornia.geometry.conversions import rotation_matrix_to_quaternion
 
 
 def compare_rotationsError(R1, R2):
@@ -237,7 +239,7 @@ def get_camera_matrix_from_Vt(V, t):
     :param t: Camera Position
     :return: Camera matrix
     """
-	return torch.inverse(V).T @ torch.cat((torch.eye(3), -t), dim=1)
+	return torch.inverse(V).T @ torch.cat((torch.eye(3, device=t.device), -t.view(3, 1)), dim=1)
 
 
 def batch_get_camera_matrix_from_Vt(Vs, ts):
@@ -500,3 +502,358 @@ def remove_empty_tracks_cams(M, Ps=None, Ns=None, outliers=None, Xs=None, data=N
 	pts3DValidIndices = cam_per_pts >= cam_per_pts_thresh
 	return M, Ps, Ns, outliers, Xs, camValidIndices, pts3DValidIndices
 
+
+##################################################################################################
+
+def compute_relative_pose_from_matches(pts1, pts2, K1=None, K2=None, method='8pt'):
+    """
+    Compute relative pose between two cameras from point matches.
+    
+    Args:
+        pts1: [2, N] or [3, N] points in first image
+        pts2: [2, N] or [3, N] points in second image  
+        K1: Intrinsic matrix for first camera (optional)
+        K2: Intrinsic matrix for second camera (optional)
+        method: '8pt' for 8-point algorithm, '5pt' for 5-point algorithm
+        
+    Returns:
+        R: Relative rotation matrix [3, 3]
+        t: Relative translation vector [3, 1]
+        inliers: Boolean mask of inlier matches
+    """
+    if isinstance(pts1, torch.Tensor):
+        pts1 = pts1.cpu().numpy()
+    if isinstance(pts2, torch.Tensor):
+        pts2 = pts2.cpu().numpy()
+    
+    # Ensure points are in correct format
+    if pts1.shape[0] == 3:
+        pts1 = pts1[:2] / pts1[2]
+    if pts2.shape[0] == 3:
+        pts2 = pts2[:2] / pts2[2]
+    
+    pts1 = pts1.T  # [N, 2]
+    pts2 = pts2.T  # [N, 2]
+    
+    if method == '8pt':
+        # 8-point algorithm
+        if K1 is not None and K2 is not None:
+            # Calibrated case - compute essential matrix
+            E, inliers = cv2.findEssentialMat(pts1, pts2, K1, method=cv2.RANSAC, 
+                                            prob=0.999, threshold=1.0)
+        else:
+            # Uncalibrated case - compute fundamental matrix
+            F, inliers = cv2.findFundamentalMat(pts1, pts2, cv2.RANSAC, 1.0, 0.999)
+            if K1 is not None and K2 is not None:
+                E = K2.T @ F @ K1
+            else:
+                # For uncalibrated case, we can't get unique relative pose
+                return None, None, inliers
+    elif method == '5pt':
+        # 5-point algorithm (calibrated case only)
+        if K1 is None or K2 is None:
+            raise ValueError("5-point algorithm requires calibrated cameras")
+        E, inliers = cv2.findEssentialMat(pts1, pts2, K1, method=cv2.RANSAC, 
+                                        prob=0.999, threshold=1.0)
+    else:
+        raise ValueError(f"Unknown method: {method}")
+    
+    if E is None or inliers is None:
+        return None, None, None
+    
+    # Decompose essential matrix to get relative pose
+    _, R, t, _ = cv2.recoverPose(E, pts1, pts2, K1, mask=inliers)
+    
+    return R, t, inliers
+
+
+def batch_compute_relative_poses(matches_dict, Ks=None):
+    """
+    Compute relative poses for all camera pairs in a batch.
+    
+    Args:
+        matches_dict: Dictionary with keys (i, j) containing match data
+        Ks: List of intrinsic matrices [m, 3, 3] or None for uncalibrated case
+        
+    Returns:
+        relative_poses: Dictionary with keys (i, j) containing relative poses
+    """
+    relative_poses = {}
+    
+    for (i, j), matches in matches_dict.items():
+        pts1 = matches['pts1']
+        pts2 = matches['pts2']
+        
+        K1 = Ks[i] if Ks is not None else None
+        K2 = Ks[j] if Ks is not None else None
+        
+        R, t, inliers = compute_relative_pose_from_matches(pts1, pts2, K1, K2)
+        
+        if R is not None and t is not None:
+            relative_poses[(i, j)] = {
+                'R': torch.from_numpy(R).float(),
+                't': torch.from_numpy(t).float(),
+                'inliers': torch.from_numpy(inliers).bool() if inliers is not None else None
+            }
+    
+    return relative_poses
+
+
+def validate_relative_pose(R, t, pts1, pts2, K1=None, K2=None, threshold=4.0):
+    """
+    Validate relative pose by checking if points triangulate in front of both cameras.
+    
+    Args:
+        R: Relative rotation [3, 3]
+        t: Relative translation [3, 1]
+        pts1: Points in first image [2, N]
+        pts2: Points in second image [2, N]
+        K1: Intrinsic matrix for first camera
+        K2: Intrinsic matrix for second camera
+        threshold: Reprojection error threshold
+        
+    Returns:
+        valid: Boolean indicating if pose is valid
+        error: Mean reprojection error
+    """
+    if isinstance(R, torch.Tensor):
+        R = R.cpu().numpy()
+    if isinstance(t, torch.Tensor):
+        t = t.cpu().numpy()
+    if isinstance(pts1, torch.Tensor):
+        pts1 = pts1.cpu().numpy()
+    if isinstance(pts2, torch.Tensor):
+        pts2 = pts2.cpu().numpy()
+    
+    # Create camera matrices
+    P1 = np.eye(3, 4)  # First camera at origin
+    P2 = np.hstack([R, t])  # Second camera with relative pose
+    
+    if K1 is not None and K2 is not None:
+        P1 = K1 @ P1
+        P2 = K2 @ P2
+    
+    # Triangulate points
+    points_3d = cv2.triangulatePoints(P1, P2, pts1, pts2)
+    points_3d = points_3d / points_3d[3]  # Normalize homogeneous coordinates
+    
+    # Project back to images
+    proj1 = P1 @ points_3d
+    proj2 = P2 @ points_3d
+    
+    # Check if points are in front of cameras
+    in_front1 = proj1[2] > 0
+    in_front2 = proj2[2] > 0
+    in_front = in_front1 & in_front2
+    
+    if not np.any(in_front):
+        return False, float('inf')
+    
+    # Compute reprojection error
+    proj1 = proj1[:2] / proj1[2]
+    proj2 = proj2[:2] / proj2[2]
+    
+    error1 = np.linalg.norm(pts1 - proj1, axis=0)
+    error2 = np.linalg.norm(pts2 - proj2, axis=0)
+    
+    mean_error = np.mean(error1 + error2)
+    
+    return mean_error < threshold, mean_error
+
+def batch_get_relative_pose(Rs, ts):
+    """
+    Computes the relative pose (translation and quaternion rotation) between all pairs of cameras.
+    """
+    n = len(Rs)
+    relative_poses = torch.zeros([n, n, 7], device=Rs.device)
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                relative_poses[i, j, 3] = 1.0 # identity quaternion for rotation (wxyz format)
+                continue
+            # Relative rotation from camera j to i
+            R_rel = torch.matmul(Rs[i].T, Rs[j])
+            # Relative translation from camera j to i, in camera i's coordinate system
+            t_rel = torch.matmul(Rs[i].T, (ts[j] - ts[i]).unsqueeze(-1)).squeeze(-1)
+            # Convert rotation matrix to quaternion
+            # rotation_matrix_to_quaternion expects input of shape (b, 3, 4), but R_rel is (3, 3)
+            # So we need to expand R_rel to (1, 3, 4) with the last column as zeros
+            R_rel_expand = torch.zeros(1, 3, 4, device=R_rel.device, dtype=R_rel.dtype)
+            R_rel_expand[0, :, :3] = R_rel
+            q_rel = rotation_matrix_to_quaternion(R_rel_expand)[0]
+            relative_poses[i, j, :3] = t_rel
+            relative_poses[i, j, 3:] = q_rel
+    return relative_poses
+
+
+
+def rotation_matrix_to_quaternion(rotation_matrix, eps=1e-6):
+    """
+    This function is borrowed from https://github.com/kornia/kornia
+
+    Convert 3x4 rotation matrix to 4d quaternion vector
+
+    This algorithm is based on algorithm described in
+    https://github.com/KieranWynn/pyquaternion/blob/master/pyquaternion/quaternion.py#L201
+
+    Args:
+        rotation_matrix (Tensor): the rotation matrix to convert.
+
+    Return:
+        Tensor: the rotation in quaternion
+
+    Shape:
+        - Input: :math:`(N, 3, 4)`
+        - Output: :math:`(N, 4)`
+
+    Example:
+        >>> input = torch.rand(4, 3, 4)  # Nx3x4
+        >>> output = tgm.rotation_matrix_to_quaternion(input)  # Nx4
+    """
+    if not torch.is_tensor(rotation_matrix):
+        raise TypeError("Input type is not a torch.Tensor. Got {}".format(
+            type(rotation_matrix)))
+
+    if len(rotation_matrix.shape) > 3:
+        raise ValueError(
+            "Input size must be a three dimensional tensor. Got {}".format(
+                rotation_matrix.shape))
+    if not rotation_matrix.shape[-2:] == (3, 4):
+        raise ValueError(
+            "Input size must be a N x 3 x 4  tensor. Got {}".format(
+                rotation_matrix.shape))
+
+    rmat_t = torch.transpose(rotation_matrix, 1, 2)
+
+    mask_d2 = rmat_t[:, 2, 2] < eps
+
+    mask_d0_d1 = rmat_t[:, 0, 0] > rmat_t[:, 1, 1]
+    mask_d0_nd1 = rmat_t[:, 0, 0] < -rmat_t[:, 1, 1]
+
+    t0 = 1 + rmat_t[:, 0, 0] - rmat_t[:, 1, 1] - rmat_t[:, 2, 2]
+    q0 = torch.stack([
+        rmat_t[:, 1, 2] - rmat_t[:, 2, 1], t0,
+        rmat_t[:, 0, 1] + rmat_t[:, 1, 0], rmat_t[:, 2, 0] + rmat_t[:, 0, 2]
+    ], -1)
+    t0_rep = t0.repeat(4, 1).t()
+
+    t1 = 1 - rmat_t[:, 0, 0] + rmat_t[:, 1, 1] - rmat_t[:, 2, 2]
+    q1 = torch.stack([
+        rmat_t[:, 2, 0] - rmat_t[:, 0, 2], rmat_t[:, 0, 1] + rmat_t[:, 1, 0],
+        t1, rmat_t[:, 1, 2] + rmat_t[:, 2, 1]
+    ], -1)
+    t1_rep = t1.repeat(4, 1).t()
+
+    t2 = 1 - rmat_t[:, 0, 0] - rmat_t[:, 1, 1] + rmat_t[:, 2, 2]
+    q2 = torch.stack([
+        rmat_t[:, 0, 1] - rmat_t[:, 1, 0], rmat_t[:, 2, 0] + rmat_t[:, 0, 2],
+        rmat_t[:, 1, 2] + rmat_t[:, 2, 1], t2
+    ], -1)
+    t2_rep = t2.repeat(4, 1).t()
+
+    t3 = 1 + rmat_t[:, 0, 0] + rmat_t[:, 1, 1] + rmat_t[:, 2, 2]
+    q3 = torch.stack([
+        t3, rmat_t[:, 1, 2] - rmat_t[:, 2, 1],
+        rmat_t[:, 2, 0] - rmat_t[:, 0, 2], rmat_t[:, 0, 1] - rmat_t[:, 1, 0]
+    ], -1)
+    t3_rep = t3.repeat(4, 1).t()
+
+    mask_c0 = mask_d2 * mask_d0_d1
+    mask_c1 = mask_d2 * ~mask_d0_d1
+    mask_c2 = ~mask_d2 * mask_d0_nd1
+    mask_c3 = ~mask_d2 * ~mask_d0_nd1
+    mask_c0 = mask_c0.view(-1, 1).type_as(q0)
+    mask_c1 = mask_c1.view(-1, 1).type_as(q1)
+    mask_c2 = mask_c2.view(-1, 1).type_as(q2)
+    mask_c3 = mask_c3.view(-1, 1).type_as(q3)
+
+    q = q0 * mask_c0 + q1 * mask_c1 + q2 * mask_c2 + q3 * mask_c3
+    q /= torch.sqrt(t0_rep * mask_c0 + t1_rep * mask_c1 +  # noqa
+                    t2_rep * mask_c2 + t3_rep * mask_c3)  # noqa
+    q *= 0.5
+    return q
+
+###################################################################
+def calculate_pairwise_essential_matrices(M, Ns):
+	num_cameras = Ns.shape[0]
+
+	visibility_mask = M.view(num_cameras, 2, -1)[:, 0, :] != 0
+	norm_M = normalize_M(M, Ns).view(num_cameras, -1, 2)
+
+	essential_matrices = []
+	valid_pairs_indices = []
+
+	for i, j in combinations(range(num_cameras), 2):
+		common_mask = visibility_mask[i] & visibility_mask[j]
+
+		if common_mask.sum() < 8:
+			continue
+
+		pts_i, pts_j = norm_M[i, common_mask, :].cpu().numpy(), norm_M[j, common_mask, :].cpu().numpy()
+
+		E, _ = cv2.findEssentialMat(
+			pts_i, pts_j, cameraMatrix=np.eye(3), method=cv2.RANSAC, prob=0.9, threshold=0.1
+		)
+
+		if E is not None:
+			essential_matrices.append(torch.from_numpy(E).float())
+			valid_pairs_indices.append(torch.tensor([i, j]))
+
+	essential_matrices = torch.stack(essential_matrices).to(M.device)
+	valid_pairs = torch.stack(valid_pairs_indices)
+
+	return essential_matrices, valid_pairs
+
+
+def compute_pairwise_epipoles(M, Ns):
+	num_cameras = Ns.shape[0]
+	pairwise_epipoles = torch.zeros([num_cameras, num_cameras, 4], device=M.device)
+
+	essential_matrices, valid_pairs = calculate_pairwise_essential_matrices(M, Ns)
+	_, _, Vt_E = torch.linalg.svd(essential_matrices)
+	_, _, Vt_ET = torch.linalg.svd(essential_matrices.transpose(1, 2))
+
+	e_i, e_j = Vt_ET[:, -1, :] / Vt_ET[:, -1, -1:], Vt_E[:, -1, :] / Vt_E[:, -1, -1:]
+	pairwise_epipoles[valid_pairs[:, 0], valid_pairs[:, 1], :] = torch.cat([e_i[:, :2], e_j[:, :2]], dim=1)
+	pairwise_epipoles[valid_pairs[:, 1], valid_pairs[:, 0], :] = torch.cat([e_j[:, :2], e_i[:, :2]], dim=1)
+
+	return pairwise_epipoles
+
+def compute_pairwise_epipoles_from_Rt(Rs, ts):
+	"""
+	Vectorized computation of pairwise epipoles for all camera pairs using their R, t.
+	Args:
+		Rs: [N, 3, 3] rotation matrices (world-to-camera)
+		ts: [N, 3] translation vectors (world-to-camera)
+	Returns:
+		pairwise_epipoles: [N, N, 4] tensor, where [:, :, :2] is e_ij in i, [:, :, 2:] is e_ji in j
+	"""
+	N = Rs.shape[0]
+	device = Rs.device if torch.is_tensor(Rs) else 'cpu'
+	dtype = Rs.dtype if torch.is_tensor(Rs) else torch.float32
+
+	# Compute camera centers in world coordinates: C = -R^T t
+	Rs_T = Rs.transpose(1, 2)  # [N, 3, 3]
+	Cs = -torch.bmm(Rs_T, ts.unsqueeze(-1)).squeeze(-1)  # [N, 3]
+
+	# Expand for all pairs
+	Ci = Cs.unsqueeze(1).expand(N, N, 3)  # [N, N, 3]
+	Cj = Cs.unsqueeze(0).expand(N, N, 3)  # [N, N, 3]
+	Ri = Rs.unsqueeze(1).expand(N, N, 3, 3)  # [N, N, 3, 3]
+	Rj = Rs.unsqueeze(0).expand(N, N, 3, 3)  # [N, N, 3, 3]
+
+	# Epipole in image i: projection of Cj into i
+	e_ij_h = torch.matmul(Ri, (Cj - Ci).unsqueeze(-1)).squeeze(-1)  # [N, N, 3]
+	e_ij = e_ij_h[..., :2] / (e_ij_h[..., 2:3] + 1e-8)  # [N, N, 2]
+
+	# Epipole in image j: projection of Ci into j
+	e_ji_h = torch.matmul(Rj, (Ci - Cj).unsqueeze(-1)).squeeze(-1)  # [N, N, 3]
+	e_ji = e_ji_h[..., :2] / (e_ji_h[..., 2:3] + 1e-8)  # [N, N, 2]
+
+	# Stack to [N, N, 4]
+	pairwise_epipoles = torch.cat([e_ij, e_ji], dim=-1)  # [N, N, 4]
+
+	# Optionally, set diagonal to zero (epipole of a camera wrt itself is undefined)
+	pairwise_epipoles[torch.arange(N), torch.arange(N)] = 0
+
+	return pairwise_epipoles
