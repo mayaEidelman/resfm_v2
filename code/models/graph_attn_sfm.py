@@ -65,7 +65,7 @@ class GraphAttnSfMNet(BaseNet):
             self.n_feat_skipconn_init_projfeat_in = 0
 
         # Match outlier MLP input to the final projection feature dimension
-        outlier_in_dim = n_feat_proj_depth_head if self.depth_head_enabled else n_feat_proj
+        outlier_in_dim = n_feat_proj_depth_head if self.depth_head_enabled and n_feat_proj_depth_head is not None else n_feat_proj
         self.outlier_net = get_linear_layers_for_og([outlier_in_dim, num_feats, num_feats, 1], final_layer=True, batchnorm=True)
         if phase is Phases.FINE_TUNE:
             self.mode = 1
@@ -77,7 +77,7 @@ class GraphAttnSfMNet(BaseNet):
             first_block = i == 0
             self.equivariant_blocks.append(GraphAttnSfMLayer(
                 d_emb if i == 0 else n_feat_proj, # n_feat_proj_in
-                n_feat_proj_depth_head if self.depth_head_enabled and (i == num_layers - 1) else n_feat_proj, # n_feat_proj_out
+                n_feat_proj_depth_head if self.depth_head_enabled and (i == num_layers - 1) and n_feat_proj_depth_head is not None else n_feat_proj, # n_feat_proj_out
                 n_feat_scenepoint, # n_feat_scenepoint_hidden
                 n_feat_view, # n_feat_view_hidden
                 n_feat_global, # n_feat_global_hidden
@@ -101,7 +101,7 @@ class GraphAttnSfMNet(BaseNet):
             if not self.view_head_enabled and self.scenepoint_head_enabled:
                 raise NotImplementedError('Final feature aggregation for only view features or scenepoint features alone is not implemented.')
             self.final_global_update = GraphAttnSfMGlobalFeatureUpdate(
-                n_feat_proj_depth_head if self.depth_head_enabled and (i == num_layers - 1) else n_feat_proj,
+                n_feat_proj_depth_head if self.depth_head_enabled and n_feat_proj_depth_head is not None else n_feat_proj,
                 n_feat_scenepoint,
                 n_feat_view,
                 n_feat_proj2scenepoint_agg = n_feat_proj2scenepoint_agg,
@@ -120,7 +120,7 @@ class GraphAttnSfMNet(BaseNet):
         # if self.batchnorm:
         #     raise NotImplementedError()
         
-        if self.depth_head_enabled:
+        if self.depth_head_enabled and n_feat_proj_depth_head is not None:
             self.depth_head = get_linear_layers((1 + n_hidden_layers_depth_head) * [n_feat_proj_depth_head] + [depth_d_out], init_activation=False, final_activation=False, norm=False)
         if self.view_head_enabled:
             # When embedding pairwise features, we concatenate them to m_input in forward().
@@ -178,7 +178,7 @@ class GraphAttnSfMNet(BaseNet):
                 projection_features.pts_per_cam,
                 [n_views, n_scenepoints, 1],
             )
-        if self.embed_pairwise:
+        if self.embed_pairwise and m_input is not None:
             pairwise_features = self.pairwise_mlp(data.pairwise_epipoles).mean(dim=1)
             m_input = torch.cat([m_input, pairwise_features], dim=1)
 

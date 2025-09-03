@@ -42,8 +42,8 @@ def main():
         train_scenes = SceneData.create_scene_data_from_list(conf.get_list('dataset.train_set'), conf, compute_pairwise=compute_pairwise)
 
         train_set = ScenesDataSet(train_scenes, return_all=False, min_sample_size=min_sample_size, max_sample_size=max_sample_size, phase=Phases.TRAINING, compute_pairwise=compute_pairwise)
-        validation_set = ScenesDataSet(validation_scenes, return_all=True, compute_pairwise=False)
-        test_set = ScenesDataSet(test_scenes, return_all=True, compute_pairwise=False) # TODO: check if compute_pairwise is needed also in test set
+        validation_set = ScenesDataSet(validation_scenes, return_all=True, compute_pairwise=compute_pairwise)
+        test_set = ScenesDataSet(test_scenes, return_all=True, compute_pairwise=compute_pairwise)
 
         # Create dataloaders
         train_loader = torch.utils.data.DataLoader(train_set, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)

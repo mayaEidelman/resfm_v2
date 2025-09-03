@@ -24,11 +24,11 @@ def pairwise_epipole_loss(data, Rs_pred, ts_pred, device=None):
 
         # Get ground-truth pairwise epipoles [N, N, 4]
         # Extract Rs_gt and ts_gt from SceneData object
-        Ks_invT = getattr(data, 'Ns_invT', None)
-        Ks = Ks_invT.transpose(1, 2) if Ks_invT is not None else None
-        Rs_gt, ts_gt = geo_utils.decompose_camera_matrix(data.y.to(device), Ks.to(device) if Ks is not None else None)
-        gt_epipoles = geo_utils.compute_pairwise_epipoles_from_Rt(Rs_gt, ts_gt)
-        # gt_epipoles = data.pairwise_epipoles.to(device, dtype=pred_epipoles.dtype)
+        # Ks_invT = getattr(data, 'Ns_invT', None)
+        # Ks = Ks_invT.transpose(1, 2) if Ks_invT is not None else None
+        # Rs_gt, ts_gt = geo_utils.decompose_camera_matrix(data.y.to(device), Ks.to(device) if Ks is not None else None)
+        # gt_epipoles = geo_utils.compute_pairwise_epipoles_from_Rt(Rs_gt, ts_gt)
+        gt_epipoles = data.pairwise_epipoles.to(device, dtype=pred_epipoles.dtype)
 
         # Only consider off-diagonal pairs (i != j)
         N = gt_epipoles.shape[0]
