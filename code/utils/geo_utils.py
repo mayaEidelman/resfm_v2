@@ -209,8 +209,6 @@ def calculate_pairwise_essential_matrices(M, Ns):
 
 
 def compute_pairwise_epipoles(M, Ns):
-	print('Computing pairwise epipoles')
-
 	num_cameras = Ns.shape[0]
 	pairwise_epipoles = torch.zeros([num_cameras, num_cameras, 4], device=M.device)
 
@@ -223,6 +221,16 @@ def compute_pairwise_epipoles(M, Ns):
 	pairwise_epipoles[valid_pairs[:, 1], valid_pairs[:, 0], :] = torch.cat([e_j[:, :2], e_i[:, :2]], dim=1)
 
 	return pairwise_epipoles
+
+
+def calculate_pairwise_camera_poses(Rs, ts):
+	num_cams = Rs.shape[0]
+	i_indices, j_indices = torch.triu_indices(num_cams, num_cams, offset=1)
+
+	relative_Rs = torch.bmm(Rs[j_indices], Rs[i_indices].transpose(1, 2))
+	relative_ts = ts[j_indices] - ts[i_indices]
+
+	return relative_Rs, relative_ts
 
 
 def batch_get_bifocal_tensors(Rs, ts):
