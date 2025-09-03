@@ -175,11 +175,6 @@ class PairwiseConsistencyLoss(nn.Module):
         translation_angle_loss = self.translation_angle_loss(pred_t_rel, gt_t_rel)
         translation_magnitude_loss = self.translation_magnitude_loss(pred_t_rel, gt_t_rel)
 
-        if epoch is not None and epoch % 100 == 0:
-            print(f'Rotation Loss: {rotation_loss.item()}')
-            print(f'Translation Angle Loss: {translation_angle_loss.item()}')
-            print(f'Translation Magnitude Loss: {translation_magnitude_loss.item()}')
-
         total_loss = self.rotation_weight * rotation_loss + \
                      self.translation_angle_weight * translation_angle_loss + \
                      self.translation_magnitude_weight * translation_magnitude_loss
