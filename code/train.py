@@ -177,21 +177,18 @@ def train(conf, train_data, model, phase, validation_data=None, test_data=None, 
 
 
     # === Resume Training (Optional) ===
-    try:
-        if conf['resume']:
-            if phase is Phases.OPTIMIZATION:
-                path, epoch = path_utils.path_to_model_resume_optimizing(conf, scan=conf.dataset.scan)
-            elif phase is Phases.TRAINING:
-                path, epoch = path_utils.path_to_model_resume_learning(conf)
-            checkpoint = torch.load(path)
-            conf["resuming_epoch"] = checkpoint['epoch']
-            if checkpoint['epoch'] >= num_of_epochs:
-                sys.exit()
-            model.load_state_dict(checkpoint['model_state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            print("The model is resuming from checkpoint:", path)
-    except:
-        pass
+    if conf['resume']:
+        if phase is Phases.OPTIMIZATION:
+            path, epoch = path_utils.path_to_model_resume_optimizing(conf, scan=conf.dataset.scan)
+        elif phase is Phases.TRAINING:
+            path, epoch = path_utils.path_to_model_resume_learning(conf)
+        checkpoint = torch.load(path)
+        conf["resuming_epoch"] = checkpoint['epoch']
+        if checkpoint['epoch'] >= num_of_epochs:
+            sys.exit()
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print("The model is resuming from checkpoint:", path)
 
 
     # === Setup Fabric and Dataloaders ===
