@@ -115,29 +115,91 @@ class OutliersLoss(nn.Module):
         return loss
 
 
+class PairwiseRotationLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, pred_R_rel, gt_R_rel):
+        relative_rot = torch.bmm(pred_R_rel, gt_R_rel.transpose(1, 2))
+        trace = relative_rot.diagonal(offset=0, dim1=-1, dim2=-2).sum(-1)
+    
+        cos_angle = torch.clamp((trace - 1) / 2, -1.0, 1.0)
+        loss = (1 - cos_angle).mean()
+
+        return loss
+
+class PairwiseTranslationAngleLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, pred_t_rel, gt_t_rel):
+        gt_t_rel_norm = F.normalize(gt_t_rel, p=2, dim=1)
+        pred_t_rel_norm = F.normalize(pred_t_rel, p=2, dim=1)
+        
+        cos_sim = torch.clamp((gt_t_rel_norm * pred_t_rel_norm).sum(dim=1), -1.0, 1.0)
+        loss = (1 - cos_sim).mean()
+
+        return loss
+
+class PairwiseTranslationMagnitudeLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, pred_t_rel, gt_t_rel):
+        gt_t_mag = torch.linalg.norm(gt_t_rel, dim=1)
+        pred_t_mag = torch.linalg.norm(pred_t_rel, dim=1)
+        
+        translation_magnitude_error = torch.abs(pred_t_mag - gt_t_mag) / (gt_t_mag + 1e-8)
+
+        return translation_magnitude_error.mean()
+
+class PairwiseConsistencyLoss(nn.Module):
+    def __init__(self, conf):
+        super().__init__()
+        self.rotation_weight = conf.get_float("loss.pairwise_rotation_weight")
+        self.translation_angle_weight = conf.get_float("loss.pairwise_translation_angle_weight")
+        self.translation_magnitude_weight = conf.get_float("loss.pairwise_translation_magnitude_weight")
+
+        self.rotation_loss = PairwiseRotationLoss()
+        self.translation_angle_loss = PairwiseTranslationAngleLoss()
+        self.translation_magnitude_loss = PairwiseTranslationMagnitudeLoss()
+
+    def forward(self, pred_cam, data, epoch=None):
+        pred_Rs, pred_ts = geo_utils.decompose_camera_matrix(pred_cam["Ps_norm"].detach())
+        gt_Rs, gt_ts = geo_utils.decompose_camera_matrix(data.y, data.Ns)
+        
+        gt_R_rel, gt_t_rel = geo_utils.calculate_pairwise_camera_poses(gt_Rs, gt_ts)
+        pred_R_rel, pred_t_rel = geo_utils.calculate_pairwise_camera_poses(pred_Rs, pred_ts)
+
+        rotation_loss = self.rotation_loss(pred_R_rel, gt_R_rel)
+        translation_angle_loss = self.translation_angle_loss(pred_t_rel, gt_t_rel)
+        translation_magnitude_loss = self.translation_magnitude_loss(pred_t_rel, gt_t_rel)
+
+        total_loss = self.rotation_weight * rotation_loss + \
+                     self.translation_angle_weight * translation_angle_loss + \
+                     self.translation_magnitude_weight * translation_magnitude_loss
+                     
+        return total_loss
+
+
 class CombinedLoss(nn.Module):
     def __init__(self, conf):
         super().__init__()
         self.outliers_loss = OutliersLoss(conf)
         self.weighted_ESFM_loss = ESFMLoss_weighted(conf)
+        self.pairwise_consistency_loss = PairwiseConsistencyLoss(conf)
         self.alpha = conf.get_float('loss.reproj_loss_weight')
         self.beta = conf.get_float('loss.classification_loss_weight')
-
+        self.gamma = conf.get_float('loss.pairwise_consistency_loss_weight')
 
     def forward(self, pred_cam, pred_outliers, pred_weights_M, data, epoch=None):
-        classificationLoss = torch.tensor([0], device=pred_outliers.device)
-        ESFMLoss = torch.tensor([0], device=pred_outliers.device)
+        zero = torch.tensor([0], device=pred_outliers.device)
 
-        # Reprojection loss (geometric loss)
-        if self.alpha:
-            ESFMLoss = self.weighted_ESFM_loss(pred_cam, pred_outliers, data)
+        ESFMLoss = self.weighted_ESFM_loss(pred_cam, pred_outliers, data) if self.alpha else zero
+        classificationLoss = self.outliers_loss(pred_outliers, data) if self.beta else zero
+        pairwise_consistency_loss = self.pairwise_consistency_loss(pred_cam, data, epoch) if self.gamma else zero
 
-        # Outlier classification loss
-        if self.beta:
-            classificationLoss = self.outliers_loss(pred_outliers, data)
-
-
-        loss = self.alpha * ESFMLoss + self.beta * classificationLoss
+        loss = self.alpha * ESFMLoss + self.beta * classificationLoss + self.gamma * pairwise_consistency_loss
 
         return loss
 

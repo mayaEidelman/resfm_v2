@@ -223,6 +223,16 @@ def compute_pairwise_epipoles(M, Ns):
 	return pairwise_epipoles
 
 
+def calculate_pairwise_camera_poses(Rs, ts):
+	num_cams = Rs.shape[0]
+	i_indices, j_indices = torch.triu_indices(num_cams, num_cams, offset=1)
+
+	relative_Rs = torch.bmm(Rs[j_indices], Rs[i_indices].transpose(1, 2))
+	relative_ts = ts[j_indices] - ts[i_indices]
+
+	return relative_Rs, relative_ts
+
+
 def batch_get_bifocal_tensors(Rs, ts):
 	n = len(Rs)
 	E = torch.zeros([n, n, 3, 3])
