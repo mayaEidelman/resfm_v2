@@ -178,6 +178,7 @@ def batch_get_cross_product_matrix(t):
 
 
 def calculate_pairwise_essential_matrices(M, Ns):
+	MIN_NUM_INLIERS = 20
 	num_cameras = Ns.shape[0]
 	
 	visibility_mask = M.view(num_cameras, 2, -1)[:, 0, :] != 0
@@ -189,16 +190,16 @@ def calculate_pairwise_essential_matrices(M, Ns):
 	for i, j in combinations(range(num_cameras), 2):
 		common_mask = visibility_mask[i] & visibility_mask[j]
 
-		if common_mask.sum() < 8:
+		if common_mask.sum() < MIN_NUM_INLIERS:
 			continue
 
 		pts_i, pts_j = norm_M[i, common_mask, :].cpu().numpy(), norm_M[j, common_mask, :].cpu().numpy()
 		
-		E, _ = cv2.findEssentialMat(
+		E, mask = cv2.findEssentialMat(
 			pts_i, pts_j, cameraMatrix=np.eye(3), method=cv2.RANSAC, prob=0.9, threshold=0.1
 		)
 
-		if E is not None:
+		if E is not None and sum(mask) > MIN_NUM_INLIERS:
 			essential_matrices.append(torch.from_numpy(E).float())
 			valid_pairs_indices.append(torch.tensor([i, j]))
 
