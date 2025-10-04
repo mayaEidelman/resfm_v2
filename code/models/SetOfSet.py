@@ -60,7 +60,7 @@ class SetOfSetOutliersNet(BaseNet):
             self.equivariant_blocks.append(SetOfSetBlock(num_feats, num_feats, conf))
 
         self.pairwise_mlp = get_linear_layers([4, 64, num_feats], final_layer=True, batchnorm=False)
-        self.m_net = get_linear_layers([num_feats * 2] * 2 + [m_d_out], final_layer=True, batchnorm=False)
+        self.m_net = get_linear_layers([num_feats] * 2 + [m_d_out], final_layer=True, batchnorm=False)
         self.n_net = get_linear_layers([num_feats] * 2 + [n_d_out], final_layer=True, batchnorm=False)
         self.outlier_net = get_linear_layers([num_feats] * 2 + [1], final_layer=True, batchnorm=False)
         if phase is Phases.FINE_TUNE:
@@ -103,8 +103,8 @@ class SetOfSetOutliersNet(BaseNet):
             # Process pairwise epipoles
             pairwise_features = self.pairwise_mlp(data.pairwise_epipoles).mean(dim=1)
 
-            # Concatenate with existing camera features
-            m_input = torch.cat([m_input, pairwise_features], dim=1)
+            # add to existing camera features
+            m_input = m_input + pairwise_features
             m_out = self.m_net(m_input)  # [m, d_m]
 
             # Points predictions
