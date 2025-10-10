@@ -162,7 +162,7 @@ def set_seed(seed):
 def init_exp(default_phase):
     # Parse Arguments
     parser = argparse.ArgumentParser()
-    parser.add_argument('--conf', default='RESFM_Learning.conf', type=str)
+    parser.add_argument('--conf', default='confs/RESFM_Learning.conf', type=str)
     parser.add_argument('--scan', type=str, default=None)
     parser.add_argument('--exp_version', type=str, default=None)
     parser.add_argument('--external_params', type=str, default=None)
