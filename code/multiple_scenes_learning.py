@@ -86,6 +86,7 @@ def optimization_all_sets(conf, device, phase):
     scans_list = conf.get_list('dataset.scans_list')
     for i, scan in enumerate(scans_list):
         conf["dataset"]["scan"] = scan
+        conf["dataset"]["scene"] = scan
         train_single_model(conf, device, phase)
 
 

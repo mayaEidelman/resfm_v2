@@ -2,3 +2,4 @@
 **/__pycache__/*
 /results
 /wget-log
+*/logs/*
