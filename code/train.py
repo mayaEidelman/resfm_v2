@@ -145,6 +145,13 @@ def epoch_train(conf, train_data, model, loss_func, optimizer, scheduler, epoch,
     mean_loss = torch.tensor(train_losses).mean()
     train_metrics = CalcMeanBatchMetrics(train_metrics, None)
 
+    for name, param in model.named_parameters():
+        if param.grad is None:
+            print(f"{name}: ❌ no grad (disconnected from loss)")
+        # else:
+        #     print(f"{name}: ✅ grad mean={param.grad.mean():.6f}, norm={param.grad.norm():.6f}")
+          
+
     return mean_loss, train_losses, [train_metrics]
 
 def train(conf, train_data, model, phase, validation_data=None, test_data=None, fabri=None):

@@ -205,6 +205,14 @@ def batch_get_fundamental_from_V_t(Vi, Vj, ti, tj):
 	Tj = batch_get_cross_product_matrix(tj)
 	return torch.bmm(Vi, torch.bmm((Ti - Tj), Vj.transpose(1, 2)))
 
+def calculate_pairwise_camera_poses(Rs, ts):
+	num_cams = Rs.shape[0]
+	i_indices, j_indices = torch.triu_indices(num_cams, num_cams, offset=1)
+
+	relative_Rs = torch.bmm(Rs[j_indices], Rs[i_indices].transpose(1, 2))
+	relative_ts = ts[j_indices] - ts[i_indices]
+
+	return relative_Rs, relative_ts
 
 def get_camera_matrix(R, t, K):
 	"""
