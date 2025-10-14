@@ -172,7 +172,7 @@ class OutliersLoss(nn.Module):
         return loss
 
 
-class CombinedLoss_otliers(nn.Module):
+class CombinedLoss_outliers(nn.Module):
     def __init__(self, conf):
         super().__init__()
         self.outliers_loss = OutliersLoss(conf)
