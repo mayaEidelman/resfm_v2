@@ -3,10 +3,11 @@ from utils import geo_utils, general_utils, sparse_utils, plot_utils
 from utils.Phases import Phases
 import numpy as np
 import networkx as nx
+import copy
 
 
 
-def is_valid_sample(data, min_pts_per_cam=10, phase=Phases.TRAINING):
+def is_valid_sample(data, min_pts_per_cam=3, phase=Phases.TRAINING):
     if phase is Phases.TRAINING:
         return data.x.pts_per_cam.min().item() >= min_pts_per_cam
     else:
@@ -42,14 +43,14 @@ def sample_indices(N, num_samples, adjacent):
 def save_cameras(outputs, conf, curr_epoch, phase):
     xs = outputs['xs']
     M = geo_utils.xs_to_M(xs)
-    general_utils.save_camera_mat(conf, outputs, outputs['scan_name'], phase, curr_epoch)
+    general_utils.save_camera_mat(conf, outputs, outputs['scene_name'], phase, curr_epoch)
 
 def save_outliers(outputs, conf, curr_epoch, phase):
     if curr_epoch is None:
-        general_utils.save_outliers_mat(conf, outputs, outputs['scan_name'], phase, curr_epoch)
+        general_utils.save_outliers_mat(conf, outputs, outputs['scene_name'], phase, curr_epoch)
 
 # def save_metrics(outputs, conf, curr_epoch, phase):
-#     general_utils.save_outliers_mat(conf, outputs, outputs['scan_name'], phase, curr_epoch)
+#     general_utils.save_outliers_mat(conf, outputs, outputs['scene_name'], phase, curr_epoch)
 
 
 def get_data_statistics(all_data, outputs=None):
@@ -205,4 +206,139 @@ def check_if_M_connected(M, thr=1, return_largest_component=False, returnAll=Fal
         return connected, list(largest_cc)
 
     return connected
+
+class AxialAggregationGraphWrapper():
+    """
+    Wrapper class for defining a graph corresponding to row-wise / column-wise aggregation of sparse matrix elements.
+    """
+    def __init__(
+        self,
+        m,
+        n,
+        agg_dim, # Determines along which dimension aggregation is carried out.
+        valid_indices = None, # (2, n_valid_mat_elements) index matrix annotating the positions of valid matrix elements.
+        device = None,
+    ):
+        if device is not None and valid_indices is not None:
+            assert valid_indices.device == device
+        if valid_indices is not None:
+            self.device = valid_indices.device
+        elif device is not None:
+            self.device = device
+        else:
+            assert False
+        self.m, self.n = m, n
+        assert agg_dim in [0, 1]
+        self.agg_dim = agg_dim
+        self.non_agg_dim = {0: 1, 1: 0}[self.agg_dim] # The remaining dimension after aggregation
+        self.n_agg_nodes = {0: m, 1: n}[self.non_agg_dim] # Determine the number of aggregation nodes from the size of the remaining dimension
+
+        self.valid_indices = valid_indices
+        if self.valid_indices is None:
+            self.dense = True
+            # If indices are not given, we assume dense connectivity.
+            row_indices = torch.arange(m, dtype=torch.int64, device=self.device)
+            col_indices = torch.arange(n, dtype=torch.int64, device=self.device)
+            self.valid_indices = torch.cartesian_prod(row_indices, col_indices).T
+            # Verify that the order is consistent with a coalesced sparse representation of a dense matrix, since this is what will determine the order during run-time:
+            assert torch.all(self.valid_indices == torch.ones((m, n)).to_sparse_coo().indices())
+        else:
+            self.dense = False
+        assert self.valid_indices.device == self.device
+        assert self.valid_indices.dtype == torch.int64
+        assert len(self.valid_indices.shape) == 2
+        n_valid_mat_elements = self.valid_indices.shape[1]
+        assert self.valid_indices.shape == (2, n_valid_mat_elements)
+
+        # Define graph for the axial aggregation.
+        self.edge_index = self.create_sparse_axial_aggregation_edges()
+
+    # def create_sparse_axial_aggregation_graph(
+    def create_sparse_axial_aggregation_edges(
+        self,
+        # m,
+        # n,
+    ):
+        """
+        Given a sparse feature matrix, create a graph aggregating every row or column into one node.
+        The nodes consist of one node for every valid matrix element (referred to as a "matrix element nodes"), and one node for every row / column, referred to as "aggregation nodes".
+        Every matrix element node is a source node, connected to the aggregation node of its corresponding row / column, consequently making up the target nodes.
+        """
+        # m, n = self.m, self.n
+        n_valid_mat_elements = self.valid_indices.shape[1]
+
+        # Initialize indices for aggregation nodes and matrix element nodes
+        agg_node_indices = torch.arange(0, self.n_agg_nodes, dtype=torch.int64, device=self.device) # While the ordering of these indices is arbitrary, it determines the order of the output aggregation node features.
+        mat_element_node_indices = torch.arange(0, n_valid_mat_elements, dtype=torch.int64, device=self.device) # While the choice of indices is arbitrary, the ordering is assumed to correspond to the elements in x_mat_elements = M[self.valid_indices[0, :], self.valid_indices[1, :], :] in self.generate_node_features().
+
+        # Adjust aggregation node indices for the new shifted positions, resulting from concatenating source node features with (dummy) target node features in self.generate_node_features().
+        agg_node_indices = agg_node_indices + n_valid_mat_elements
+
+        # Define source and target node indices
+        source_node_indices = mat_element_node_indices # Every matrix element is a source node.
+        target_node_indices = agg_node_indices[self.valid_indices[self.non_agg_dim, :]] # The aggregation nodes to connect to are determined by the corresponding row / column index.
+
+        edge_index = torch.cat([source_node_indices[None, :], target_node_indices[None, :]], dim = 0) # Graph edges, dtype long, shape (2, n_edges), where n_edges = n_valid_mat_elements
+
+        return edge_index
+
+    def generate_node_features(
+        self,
+        M, # (m, n, n_feat) feature matrix. For a sparse graph, we expect a torch hybrid sparse COO feature matrix, where the last dimension is dense.
+        x_agg = None, # Optional features for aggregation nodes (acting as query vectors). Shape (n_agg_nodes, n_feat), where n_agg_nodes is either m or n, depending on along which dimension we are aggregating.
+    ):
+        """
+        Given a sparse feature matrix, generate source nodes from its data, as well as (dummy) target nodes, on which we will apply the graph propagation.
+        """
+        assert M.device == self.device
+        m, n, n_feat = M.shape
+        assert (m, n) == (self.m, self.n)
+        n_valid_mat_elements = m * n if self.dense else self.valid_indices.shape[1]
+
+        if not self.dense:
+            assert M.is_sparse
+            assert M.sparse_dim() == 2
+            assert M.dense_dim() == 1
+            assert M.indices().shape[1] == n_valid_mat_elements
+            assert torch.all(self.valid_indices == M.indices())
+
+        # Extract matrix element node features from M
+        if self.dense:
+            x_mat_elements = M.reshape((m * n, n_feat)) # (n_valid_mat_elements, n_feat)
+        else:
+            x_mat_elements = M.values() # (n_valid_mat_elements, n_feat)
+        assert x_mat_elements.shape == (n_valid_mat_elements, n_feat)
+
+        if x_agg is not None:
+            assert not x_agg.is_sparse
+            assert x_agg.shape == (self.n_agg_nodes, n_feat)
+        else:
+            # Dummy zero features for the aggregation nodes
+            x_agg = torch.zeros((self.n_agg_nodes, n_feat), dtype=torch.float32, device=self.device)
+
+        # Concatenate source node features with (dummy) target node features
+        x = torch.cat((x_mat_elements, x_agg), dim=0) # Projection features, concatenated with dummy aggregation features, shape (n_valid_mat_elements + n_agg_nodes, n_feat)
+
+        return x
+
+    def extract_target_node_features(self, x):
+        """
+        Given all node features, extract the target features only.
+        Input: x, node features, shape (n_valid_mat_elements + n_agg_nodes, n_feat)
+        Returns: M_agg_vec, target node features, shape (m, 1, n_feat) or (1, n, n_feat), depending on along which dimension we perform axial aggregation.
+        """
+        if self.agg_dim == 0:
+            assert self.n_agg_nodes == self.n
+            M_agg_vec = x[None, -self.n:, :]
+        else:
+            assert self.n_agg_nodes == self.m
+            M_agg_vec = x[-self.m:, None, :]
+        return M_agg_vec
+
+    def to(self, device, **kwargs):
+        ret = copy.copy(self)
+        ret.device = device
+        ret.valid_indices = ret.valid_indices.to(device, **kwargs)
+        ret.edge_index = ret.edge_index.to(device, **kwargs)
+        return ret
 

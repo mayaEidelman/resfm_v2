@@ -60,7 +60,8 @@ def prepare_ba_options():
     ba_options.loss_function_type = pycolmap.LossFunctionType.CAUCHY
 
     # Solver settings
-    ba_options.solver_options.linear_solver_type = pyceres.LinearSolverType.DENSE_SCHUR
+    # Use a dense QR solver to avoid CHOLMOD SPD requirements that can fail on ill-conditioned problems
+    ba_options.solver_options.linear_solver_type = pyceres.LinearSolverType.DENSE_QR
     ba_options.solver_options.function_tolerance = 1e-4
     ba_options.solver_options.max_num_iterations = 300
     ba_options.solver_options.num_threads = 24

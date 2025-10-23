@@ -2,3 +2,6 @@
 **/__pycache__/*
 /results
 /wget-log
+*/logs/*
+/pretrained_model/*
+/logs/*

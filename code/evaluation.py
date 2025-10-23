@@ -15,7 +15,7 @@ from datasets import Euclidean
 def prepare_predictions(data, pred_cam, conf, bundle_adjustment, phase, curr_epoch=None):
     # Take the inputs from pred cam and turn to ndarray
     outputs = {}
-    outputs['scan_name'] = data.scan_name
+    outputs['scene_name'] = data.scene_name
     calibrated = conf.get_bool('dataset.calibrated')
     images_path = path_utils.path_to_images(conf)
     conf['phase'] = phase
@@ -98,7 +98,7 @@ def prepare_outliers_predictions(data, pred_outliers, conf):
     outputs = {}
 
     # Basic scene metadata
-    outputs['scan_name'] = data.scan_name
+    outputs['scene_name'] = data.scene_name
     outputs['img_list'] = data.img_list
     outputs['M'] = data.M.cpu().numpy()
 

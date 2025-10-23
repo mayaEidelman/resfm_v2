@@ -26,7 +26,7 @@ def classificationMetrics(pred, gt):
     epsilon = 1e-20
 
     # Convert predicted scores to binary labels
-    pred_labels = (pred >= 0.5).float()
+    pred_labels = (pred >= 0.6).float()
 
     # Base stats
     outliers_percent = (gt == 1).sum().item() / gt.shape[0]
@@ -36,6 +36,7 @@ def classificationMetrics(pred, gt):
     fp = torch.sum((pred_labels == 1) & (gt == 0)).item()
     tn = torch.sum((pred_labels == 0) & (gt == 0)).item()
     fn = torch.sum((pred_labels == 0) & (gt == 1)).item()
+    # print('tp', tp, 'fp', fp, 'tn', tn, 'fn', fn)
 
     # Classification metrics
     accuracy = (tp + tn) / (tp + fp + tn + fn)
@@ -49,6 +50,16 @@ def classificationMetrics(pred, gt):
     outliers_avg = pred[gt == 1].mean().item()            # Mean score for real outliers
     inliers_avg = pred[gt == 0].mean().item()             # Mean score for real inliers
     f_inliers_avg = pred[(pred_labels == 0) & (gt == 1)].mean().item()  # False inliers avg score
+    # print('Accuracy', accuracy,
+    #       'Precision', precision,
+    #       'Recall', recall,
+    #       'Recall(inliers)', recall_inliers,
+    #       'F1_score', f1_score,
+    #       '%outliers', outliers_percent,
+    #       '%outliers_after', outliers_after,
+    #       'outliers_avg', outliers_avg,
+    #       'inliers_avg', inliers_avg,
+    #       'f_inliers_avg', f_inliers_avg,)
 
     return {
         'Accuracy': accuracy,

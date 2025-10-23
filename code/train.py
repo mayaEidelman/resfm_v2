@@ -47,7 +47,11 @@ def epoch_evaluation(data_loader, model, conf, epoch, phase, save_predictions=Fa
     errors = None
     model.eval()
     with torch.no_grad():
-        for batch_data in data_loader:
+        for j, batch_data in enumerate(data_loader):
+            print('Scene batch {}/{}.'.format(j+1, len(data_loader)))
+            for curr_data in batch_data:
+                print("Memory before eval on {}: Allocated {} MiB, reserved {} MiB.".format(curr_data.scene_name, torch.cuda.memory_allocated()//2**20, torch.cuda.memory_reserved()//2**20))
+
             # A batch of scenes
             for curr_data in batch_data:
                 # One scene
@@ -76,7 +80,7 @@ def epoch_evaluation(data_loader, model, conf, epoch, phase, save_predictions=Fa
                     metrics.update(stats)
 
 
-                metrics['Scene'] = curr_data.scan_name
+                metrics['Scene'] = curr_data.scene_name
                 metrics_list.append(metrics)
 
                 if save_predictions:
@@ -84,7 +88,7 @@ def epoch_evaluation(data_loader, model, conf, epoch, phase, save_predictions=Fa
                         dataset_utils.save_outliers(outliersOutputs, conf, curr_epoch=epoch, phase=phase)
                     if errors is not None:
                         errors.update(errors_per_cam)
-                        plot_utils.plot_cameras_before_and_after_ba(outputs, errors, conf, phase, scan=curr_data.scan_name, epoch=epoch, bundle_adjustment=bundle_adjustment)
+                        plot_utils.plot_cameras_before_and_after_ba(outputs, errors, conf, phase, scan=curr_data.scene_name, epoch=epoch, bundle_adjustment=bundle_adjustment)
 
     df_metrics = evaluation.organize_errors(metrics_list)
     model.train()
@@ -95,14 +99,14 @@ def epoch_train(conf, train_data, model, loss_func, optimizer, scheduler, epoch,
     model.train()
     train_losses = []
     train_metrics = []
-
+    
     for train_batch in train_data:
         batch_loss = torch.tensor([0.0], device=train_data.device)
         optimizer.zero_grad()
 
         for i, curr_data in enumerate(train_batch):
             if not dataset_utils.is_valid_sample(curr_data, phase=phase, min_pts_per_cam=0):
-                print(f"{fabric.global_rank}: {epoch} {curr_data.scan_name} has a camera with not enough points")
+                print(f"{fabric.global_rank}: {epoch} {curr_data.scene_name} has a camera with not enough points")
                 continue
 
             pred_cam, pred_outliers = model(curr_data)
@@ -140,6 +144,13 @@ def epoch_train(conf, train_data, model, loss_func, optimizer, scheduler, epoch,
 
     mean_loss = torch.tensor(train_losses).mean()
     train_metrics = CalcMeanBatchMetrics(train_metrics, None)
+
+    for name, param in model.named_parameters():
+        if param.grad is None:
+            print(f"{name}: ❌ no grad (disconnected from loss)")
+        # else:
+        #     print(f"{name}: ✅ grad mean={param.grad.mean():.6f}, norm={param.grad.norm():.6f}")
+          
 
     return mean_loss, train_losses, [train_metrics]
 
@@ -222,6 +233,8 @@ def train(conf, train_data, model, phase, validation_data=None, test_data=None, 
     begin_time = time()
 
     # === Training Loop ===
+    print(f'Started training with epoch number: {num_of_epochs}, phase: {phase}, output mode: {OUTPUT_MODES_TYPES[conf.get_int("model.output_mode", default=3)]}, data length: {len(train_data)}, embed_pairwise: {conf.get_bool("model.embed_pairwise")}')
+
     for epoch in range(conf["resuming_epoch"] + 1, num_of_epochs):
         ba_during_training = not conf.get_bool('ba.only_last_eval') and conf.get_bool('ba.run_ba', default=True)
 
@@ -236,7 +249,7 @@ def train(conf, train_data, model, phase, validation_data=None, test_data=None, 
                 train_metrics_means = CalcMeanBatchMetrics(train_metrics, phase)
                 wandb.log(train_metrics_means, step=epoch)
             if epoch % 100 == 0:
-                print(f'{fabric.global_rank}:{epoch} Train Loss: {mean_train_loss}')
+                print(f'{fabric.global_rank}:{epoch} Train Loss: {mean_train_loss}, time: {time() - begin_time}')
 
 
         # === Evaluation ===

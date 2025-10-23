@@ -1,38 +1,55 @@
+# from pytorch3d.transforms import axis_angle_to_matrix
+import copy
+import logging
+import math
 import torch
 from utils import geo_utils, dataset_utils, sparse_utils
-from datasets import  Euclidean
+from utils.general_utils import nonzero_safe
+from utils.constants import *
+from datasets import Projective, Euclidean
 import os.path
 from pyhocon import ConfigFactory
 import numpy as np
 import warnings
 
 
-
-
-
 class SceneData:
-    def __init__(self, M, Ns, Ps_gt, scan_name, dilute_M=False, outliers=None, dict_info=None, nameslist=None, M_original=None):
-
+    def __init__(self,M, Ns,Ps_gt, scene_name, calibrated = False, store_depth_targets = False, depths = None, dilute_M=False, outliers=None, dict_info=None, nameslist=None, M_original=None, pairwise_epipoles=None, compute_pairwise=True
+    ):
+        """
+        If calibrated = True, then N = inv(K), and the camera matrices, as they are normalized with N, are calibrated.
+        """
         if M_original is None:
             M_original = M.detach().clone()
 
         # Dilute M
         if dilute_M:
             M = geo_utils.dilutePoint(M)
-
-
         n_images = Ps_gt.shape[0]
 
+        # Determine the device
+        self.device = M.device
+
         # Set attribute
-        self.scan_name = scan_name
+        self.scene_name = scene_name
+        self.calibrated = calibrated
+        self.store_depth_targets = store_depth_targets
         self.y = Ps_gt
-        self.M = M
+        self._M = M
         self.M_original = M_original
         self.Ns = Ns
         self.outlier_indices = outliers
+        self.dict_info = dict_info
+
+        # Calculate and store pairwise epipoles
+        if compute_pairwise:
+            self.pairwise_epipoles = geo_utils.compute_pairwise_epipoles(M, Ns) if pairwise_epipoles is None else pairwise_epipoles
+        else:
+            self.pairwise_epipoles = None
+
 
         # M to sparse matrix
-        self.x = dataset_utils.M2sparse(M, normalize=True, Ns=Ns, M_original=M_original)
+        self.x = dataset_utils.M2sparse(self.M, normalize=True, Ns=self.Ns, M_original=M_original)
 
         # Get image list
         if nameslist is None:
@@ -40,49 +57,198 @@ class SceneData:
         else:
             self.img_list = nameslist
 
-
-
-        # Prepare Ns inverse transpose
-        self.Ns_invT = torch.transpose(torch.inverse(Ns), 1, 2)
+        # Prepare Ns inverse
+        self.Ns_invT = torch.transpose(torch.inverse(self.Ns), 1, 2)
 
         # Get valid points
-        self.valid_pts = dataset_utils.get_M_valid_points(M)
+        self.valid_pts = dataset_utils.get_M_valid_points(self.M)
 
         # Normalize M
-        self.norm_M = geo_utils.normalize_M(M, Ns, self.valid_pts).transpose(1, 2).reshape(n_images * 2, -1)
+        self._norm_M = geo_utils.normalize_M(self.M, self.Ns, self.valid_pts).transpose(1, 2).reshape(n_images * 2, -1)
+
+        # Triangulate scenepoints and store a target depths for prediction (at a normalized scale)
+        if self.store_depth_targets:
+            print("Storing depth targets...")
+            valid_pts_idx = nonzero_safe(self.valid_pts)
+            if depths is not None:
+                # Precomputed depths already provided
+                self.depths = depths
+            else:
+                # TODO: Ideally we should store a sparse representation, but such a change is mostly relevant if considering the other dense matrices as well.
+                # For the moment we store the depth for every view / scenepoint combination, no matter whether it is visible or not.
+                if not calibrated:
+                    # NOTE: Even in the uncalibrated case, the depth should be possible to infer by normalizing the camera matrix such that the third row has unit length...
+                    raise NotImplementedError
+                K_inv = self.Ns
+                X = torch.tensor(geo_utils.n_view_triangulation(
+                    self.y.numpy(),
+                    self.M.numpy(),
+                    Ns = K_inv.numpy(),
+                ), dtype=torch.float32)
+
+                # Verify certain assumptions required for the depth calculation below
+                valid_scenepoint_mask = torch.any(self.valid_pts, dim=0) # Determine which points are visible in enough cameras
+                valid_scenepoint_idx = nonzero_safe(valid_scenepoint_mask)[0]
+                assert torch.all(torch.isfinite(X[:, valid_scenepoint_idx])) # Verify no NaN in triangulation
+                assert torch.all(X[3, valid_scenepoint_idx] == 1) # Verify normalized (pflat)
+                assert torch.all(K_inv[:, 2, :] == torch.tensor([0, 0, 1])[None, None, :]) # Verify final row [0, 0, 1] of K_inv
+                assert torch.allclose(torch.norm((K_inv @ self.y)[:, :, :3], dim=2), torch.ones((1, 1))) # Verify unit rows of R, as extracted from K_inv*(K*[R  t]).
+
+                self.depths = (K_inv @ self.y @ X)[:, 2, :]
+                # NOTE: The scene should be normalized such that the depths have a nominal magnitude.
+                #       While we could perform it here, it would require maintaining that scale whenever we transform / subsample the scene data.
+                #       Instead, we perform the normalization when computing the loss.
+            assert self.depths.shape == (n_images, self.M.shape[1])
+            assert torch.all(torch.isfinite(self.depths[valid_pts_idx[0], valid_pts_idx[1]]))
+            assert torch.all(self.depths[valid_pts_idx[0], valid_pts_idx[1]] > 0)
+        else:
+            self.depths = None
+
+        # Define the graph connectivity for the aggregations from projection features to view features and scenepoint features, respectively.
+        self.graph_wrappers = self.create_axial_aggregation_graphs(
+            self.x,
+        )
+        logging.info('Scene data has initialized')
+
+    @property
+    def M(self):
+        if not self._M.device == self.device:
+            self._M = self._M.to(self.device)
+        return self._M
+
+    @property
+    def norm_M(self):
+        if not self._norm_M.device == self.device:
+            self._norm_M = self._norm_M.to(self.device)
+        return self._norm_M
+
+    def create_axial_aggregation_graphs(
+        self,
+        x, # (m, n, 2) sparse measurement matrix of projections
+    ):
+        x = x.to_torch_hybrid_sparse_coo()
+
+        m, n = x.shape[0], x.shape[1]
+        valid_indices = x.indices()
+        device = x.device
+
+        # Define graph for row-wise aggregation.
+        # Nodes consist of all valid matrix elements, followed by one node per row.
+        graph_wrapper_proj2view = dataset_utils.AxialAggregationGraphWrapper(m, n, 1, valid_indices=valid_indices)
+
+        # Define graph for column-wise aggregation.
+        # Nodes consist of all valid matrix elements, followed by one node per column.
+        graph_wrapper_proj2scenepoint = dataset_utils.AxialAggregationGraphWrapper(m, n, 0, valid_indices=valid_indices)
+
+        # Define (dense) graph for global (column-wise) aggregation of row nodes (=view nodes).
+        # NOTE: If there are views with fewer than 10 points, the scene will be discarded on the basis of dataset_utils.is_valid_sample().
+        # Let's be consistent with this number, although since the scene would then be discarded, it is probably not needed to leave out some views from the view2global aggregation.
+        valid_view_mask = sparse_utils.get_n_nonempty(x, dim=1, keepdim=True).to_dense() >= MIN_N_POINTS_PER_VIEW
+        if valid_view_mask.is_cuda:
+            valid_view_indices = torch.nonzero(valid_view_mask).T
+        else:
+            valid_view_indices = torch.from_numpy(np.array(np.nonzero(valid_view_mask.numpy())))
+        graph_wrapper_view2global = dataset_utils.AxialAggregationGraphWrapper(m, 1, 0, valid_indices=valid_view_indices, device=device)
+
+        # Define (dense) graph for global (row-wise) aggregation of column nodes (=scenepoint nodes).
+        valid_scenepoint_mask = sparse_utils.get_n_nonempty(x, dim=0, keepdim=True).to_dense() >= MIN_N_VIEWS_PER_POINT # Need visibility in at least 2 views. If < 2, it is probably == 0 due to previous filtering.
+        if valid_scenepoint_mask.is_cuda:
+            valid_scenepoint_indices = torch.nonzero(valid_scenepoint_mask).T
+        else:
+            valid_scenepoint_indices = torch.from_numpy(np.array(np.nonzero(valid_scenepoint_mask.numpy())))
+        graph_wrapper_scenepoint2global = dataset_utils.AxialAggregationGraphWrapper(1, n, 1, valid_indices=valid_scenepoint_indices, device=device)
+
+        graph_wrappers = {
+            'proj2view': graph_wrapper_proj2view,
+            'proj2scenepoint': graph_wrapper_proj2scenepoint,
+            'view2global': graph_wrapper_view2global,
+            'scenepoint2global': graph_wrapper_scenepoint2global,
+        }
+
+        return graph_wrappers
+
+    def to(self, device, *args, dense_on_demand=False, **kwargs):
+        def recognized_transferable(x):
+            return any([
+                isinstance(x, sparse_utils.SparseMat),
+                isinstance(x, dataset_utils.AxialAggregationGraphWrapper),
+                torch.is_tensor(x),
+            ])
+        # Start with making a shallow copy of self:
+        ret = copy.copy(self)
+        # Next, replace all attributes with the corresponding data moved to the device:
+        for key in ret.__dict__:
+            if key.startswith('__'):
+                continue
+            if dense_on_demand and key in ['_M', '_norm_M']:
+                continue
+            attr = getattr(ret, key)
+            if recognized_transferable(attr):
+                setattr(ret, key, attr.to(device, *args, **kwargs))
+            elif isinstance(attr, dict):
+                # Only call .to on values that support it
+                new_dict = {}
+                for dict_key, dict_val in attr.items():
+                    if recognized_transferable(dict_val):
+                        new_dict[dict_key] = dict_val.to(device, *args, **kwargs)
+                    else:
+                        new_dict[dict_key] = dict_val
+                setattr(ret, key, new_dict)
+
+        ret.device = device
+
+        return ret
+
+    # def to(self, *args, **kwargs):
+    #     for key in self.__dict__:
+    #         if not key.startswith('__'):
+    #             attr = getattr(self, key)
+    #             if isinstance(attr, sparse_utils.SparseMat) or torch.is_tensor(attr):
+    #                 setattr(self, key, attr.to(*args, **kwargs))
+
+    #     return self
 
 
-        # Stats of the scene
-        self.dict_info = dict_info
+def create_scene_data(
+    conf,
+    scene = None,
+    calibrated = None,
+    use_gt = None,
+    phase=None,
+    compute_pairwise=True
+):
+    store_depth_targets = conf.get_bool('model.depth_head.enabled', default=False)
 
-
-    def to(self, *args, **kwargs):
-        for key in self.__dict__:
-            if not key.startswith('__'):
-                attr = getattr(self, key)
-                if isinstance(attr, sparse_utils.SparseMat) or torch.is_tensor(attr):
-                    setattr(self, key, attr.to(*args, **kwargs))
-
-        return self
-
-
-def create_scene_data(conf, phase=None):
-    # Init
-    scan = conf.get_string('dataset.scan')
-    calibrated = conf.get_bool('dataset.calibrated')
+    # Optionally override some configuration options:
+    scene = scene if scene is not None else conf.get_string('dataset.scene')
+    calibrated = calibrated if calibrated is not None else conf.get_bool('dataset.calibrated')
+    use_gt = use_gt if use_gt is not None else conf.get_bool('dataset.use_gt')
     dilute_M = conf.get_bool('dataset.diluteM', default=False)
-
-
     # Get raw data
     if calibrated:
-        M, Ns, Ps_gt, outliers, dict_info, namesList, M_original = Euclidean.get_raw_data(conf, scan, phase)
+        M, Ns, Ps_gt, outliers, dict_info, namesList, M_original = Euclidean.get_raw_data(conf,scene, phase)
     else:
-        raise ValueError("The code doesn't support the uncalibrated case")
+        M, Ns, Ps_gt = Projective.get_raw_data(conf, scene, use_gt)
 
-    return SceneData(M, Ns, Ps_gt, scan, dilute_M, outliers=outliers, dict_info=dict_info, nameslist=namesList, M_original=M_original)
+    scene_data = SceneData(
+        M,
+        Ns,
+        Ps_gt,
+        scene,
+        calibrated = calibrated,
+        store_depth_targets = store_depth_targets,
+        dilute_M = dilute_M, 
+        outliers=outliers, 
+        dict_info=dict_info, 
+        nameslist=namesList,
+        M_original=M_original,
+        compute_pairwise=compute_pairwise
+    )
+    # assert dataset_utils.is_valid_sample(scene_data)
+    return scene_data
 
 
-def sample_data(data, num_samples, adjacent=True):
+def sample_data(data, num_samples, adjacent=True, compute_pairwise=True):
     """For a given scene, randomly sample num_samples cameras (rows), adjacent or not.
     Note: when the requested num_samples is more than available cameras, all cameras will be returned"""
 
@@ -93,31 +259,94 @@ def sample_data(data, num_samples, adjacent=True):
     indices = torch.from_numpy(indices).squeeze()
     M_indices = torch.from_numpy(M_indices).squeeze()
 
+    depths = data.depths
+    if data.store_depth_targets:
+        assert depths is not None
+
     # Get sampled data
     y, Ns = data.y[indices], data.Ns[indices]
     M = data.M[M_indices]
     outlier_indices = data.outlier_indices[indices]
     outlier_indices = outlier_indices[:, (M > 0).sum(dim=0) > 2]
-
     M = M[:, (M > 0).sum(dim=0) > 2]
+    if data.store_depth_targets:
+        depths = depths[indices, :]
 
+    if compute_pairwise:
+        pairwise_epipoles = data.pairwise_epipoles[indices][:, indices]
+    else:
+        pairwise_epipoles = None
 
-
-    sampled_data = SceneData(M, Ns, y, data.scan_name,outliers=outlier_indices, nameslist=data.img_list[indices])
+    sampled_data = SceneData(
+        M,
+        Ns,
+        y,
+        data.scene_name,
+        calibrated = data.calibrated,
+        store_depth_targets = data.store_depth_targets,
+        depths = depths,
+        outliers=outlier_indices, 
+        nameslist=data.img_list[indices], 
+        pairwise_epipoles=pairwise_epipoles,
+        compute_pairwise=compute_pairwise
+    )
     if (sampled_data.x.pts_per_cam == 0).any():
-        warnings.warn('Cameras with no points for dataset '+ data.scan_name)
+        warnings.warn('Cameras with no points for dataset '+ data.scene_name)
 
     return sampled_data
 
-
-def create_scene_data_from_list(scan_names_list, conf):
+def create_scene_data_from_list(scene_names_list, conf, compute_pairwise=False):
     data_list = []
-    for scan_name in scan_names_list:
-        conf["dataset"]["scan"] = scan_name
-        data = create_scene_data(conf)
+    for scene_name in scene_names_list:
+        conf["dataset"]["scene"] = scene_name
+        data = create_scene_data(conf, scene=scene_name, compute_pairwise=compute_pairwise)
         data_list.append(data)
 
     return data_list
+
+
+def test_dataset():
+    # Prepare configuration
+    dataset_dict = {"images_path": "/home/labs/waic/hodaya/PycharmProjects/GNN-for-SFM/datasets/images/",
+                    "normalize_pts": True,
+                    "normalize_f": True,
+                    "use_gt": False,
+                    "calibrated": False,
+                    "scene": "Alcatraz Courtyard",
+                    "edge_min_inliers": 30,
+                    "use_all_edges": True,
+                    }
+
+    train_dict = {"infinity_pts_margin": 1e-4,
+                  "hinge_loss_weight": 1,
+                  }
+    loss_dict = {"infinity_pts_margin": 1e-4,
+    "pts_grad_equalization_pre_perspective_divide": False,
+    "hinge_loss": True,
+    "hinge_loss_weight" : 1
+    }
+    conf_dict = {"dataset": dataset_dict, "loss":loss_dict}
+
+    print("Test projective")
+    conf = ConfigFactory.from_dict(conf_dict)
+    data = create_scene_data(conf, compute_pairwise=False)
+    test_data(data, conf)
+
+    print('Test move to device')
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    new_data = data.to(device)
+
+    print(os.linesep)
+    print("Test Euclidean")
+    conf = ConfigFactory.from_dict(conf_dict) # This conf reset may no longer be necessary, but let's keep it in case we have overlooked some modification of conf inside any of the called functions.
+    data = create_scene_data(conf, calibrated=True, compute_pairwise=False)
+    test_data(data, conf)
+
+    print(os.linesep)
+    print("Test use_gt GT")
+    conf = ConfigFactory.from_dict(conf_dict) # This conf reset may no longer be necessary, but let's keep it in case we have overlooked some modification of conf inside any of the called functions.
+    data = create_scene_data(conf, use_gt=True, compute_pairwise=False)
+    test_data(data, conf)
 
 
 def test_data(data, conf):
@@ -162,10 +391,45 @@ def get_subset(data, subset_size):
 
     indices = torch.sort(torch.tensor(indices))[0]
     M_indices = torch.sort(torch.cat((2 * indices, 2 * indices + 1)))[0]
+    M = M[:, (M > 0).sum(dim=0) > 2]
+
+    depths = data.depths
+    if data.store_depth_targets:
+        assert depths is not None
+
     y, Ns = data.y[indices], data.Ns[indices]
     M = data.M[M_indices]
-    M = M[:, (M > 0).sum(dim=0) > 2]
-    return SceneData(M, Ns, y, data.scan_name + "_{}".format(subset_size), outliers=data.outlier_indices[indices], dict_info=data.dict_info, nameslist=data.img_list[indices])
+    if data.store_depth_targets:
+        depths = depths[indices, :]
+
+    # Additional point filtering, discarding points that are not visible in at least MIN_N_VIEWS_PER_POINT views:
+    # M_valid_pts_mask = dataset_utils.get_M_valid_points(M)
+    # points_mask = M_valid_pts_mask.any(dim=0) # M_valid_pts_mask is False for the entire column of such points, so we just need to check for which columns of the mask there are True entries.
+    # if M.is_cuda:
+    #     M = M[:, points_mask]
+    #     if data.store_depth_targets:
+    #         depths = depths[:, points_mask]
+    # else:
+    #     # NOTE: Workaround for bug in nonzero_out_cpu(), internally called by pytorch during advanced indexing operation.
+    #     idx = np.nonzero(points_mask.numpy())[0]
+    #     assert len(idx.shape) == 1, 'Expected 1D-array, but encountered idx.shape == {}'.format(idx.shape)
+    #     M = M[:, torch.from_numpy(idx)]
+    #     if data.store_depth_targets:
+    #         depths = depths[:, torch.from_numpy(idx)]
+
+    return SceneData(
+        M,
+        Ns,
+        y,
+        data.scene_name + "_{}".format(subset_size),
+        calibrated = data.calibrated,
+        store_depth_targets = data.store_depth_targets,
+        depths = depths,
+        outliers=data.outlier_indices[indices], 
+        dict_info=data.dict_info, 
+        nameslist=data.img_list[indices]
+    )
+
 
 if __name__ == "__main__":
     test_dataset()
